@@ -1,0 +1,102 @@
+"""Hierarchisches Ziel der Umgebung (Abschnitt reward in problem_config.json).
+
+Kosten eines fertigen Plans: Summe aus Ebene * Gewicht. Ohne feste Gewichte
+(level_weights = null) sind die Gewichte so gewaehlt, dass die Ordnung exakt
+lexikografisch ist: Eine Einheit einer Ebene wiegt mehr als jeder moegliche Wert
+aller tieferen Ebenen. Standard: erst Summe der Verspaetungen, dann Makespan.
+
+Stepwise-Reward: Aenderung der geschaetzten Kosten. Die Schaetzung nutzt
+estimate_completion; am Episodenende gilt die echte Fertigstellung. In der Summe bleibt
+also (Startschaetzung - echte Kosten), Schaetzfehler verfaelschen das Ziel nicht.
+"""
+from __future__ import annotations
+
+import torch
+
+from rl.time_model import SETUP, TimeModel
+
+
+def estimate_completion(td: dict[str, torch.Tensor], time_model: TimeModel) -> torch.Tensor:
+    """Geschaetzte Fertigstellung je Job (B, J), mit Zeitfaktoren, Pause und Arbeitsende.
+
+    Fertige Jobs: echte Fertigstellung. Naechste Operation: beste Ressource mit Belegung
+    und Ruestung vom aktuellen Vorgaenger. Weitere Operationen: kleinste Basisdauer und
+    kleinste Ruestung. Andere Jobs, die spaeter um Ressourcen konkurrieren, zaehlen nicht."""
+    time = td["time"].unsqueeze(1)
+    ready = torch.maximum(td["job_ready"], time)
+    next_op, complete = td["next_op"], td["job_complete"]
+
+    base = td["opt_base"]
+    kinds = td["op_kind"].gather(1, next_op).unsqueeze(2).expand_as(base)
+    earliest = torch.maximum(ready.unsqueeze(2), td["busy_until"].unsqueeze(1))
+    after_setup = time_model.finish_after(SETUP, td["opt_setup_base"], earliest)
+    finish = time_model.finish_after(kinds, base, after_setup)
+    finish = finish.masked_fill(base == 0, torch.iinfo(torch.long).max)
+    estimate = torch.where(complete, td["job_ready"], finish.amin(2))
+
+    last_op = td["end_op_per_job"]
+    longest = int((last_op - td["start_op_per_job"]).max().item())
+    num_ops = td["op_kind"].shape[1]
+    for offset in range(1, longest + 1):
+        op = next_op + offset
+        pending = ~complete & (op <= last_op)
+        if not pending.any():
+            break
+        op = op.clamp(max=num_ops - 1)
+        after_setup = time_model.finish_after(SETUP, td["min_setup_times"].gather(1, op), estimate)
+        following = time_model.finish_after(td["op_kind"].gather(1, op),
+                                            td["min_proc_times"].gather(1, op), after_setup)
+        estimate = torch.where(pending, following, estimate)
+    return estimate
+
+
+class HierarchicalCost:
+    """Kosten und Reward aus den Einstellungen in der Konfiguration."""
+
+    def __init__(self, config: dict):
+        reward = config["reward"]
+        self.levels = tuple(reward["levels"])
+        self.level_weights = reward["level_weights"]
+        self.scale = reward["scale_minutes"]
+        self.penalty = config["environment"]["truncation_penalty_minutes"]
+
+    def level_values(self, td: dict[str, torch.Tensor],
+                     completion: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Alle Zielgroessen je Instanz. Reicht der Horizont nicht (truncated), kostet jede
+        offene Operation zusaetzliche Verspaetung; der Makespan bleibt auf den Horizont begrenzt."""
+        tardiness = (completion - td["due"]).clamp(min=0)
+        open_ops = (~td["op_scheduled"]).sum(1)
+        penalty = td["truncated"].to(torch.long) * open_ops * self.penalty
+        return {"total_tardiness": tardiness.sum(1) + penalty,
+                "late_jobs": (tardiness > 0).sum(1),
+                "max_tardiness": tardiness.amax(1) + penalty,
+                "makespan": torch.minimum(completion.amax(1), td["horizon"])}
+
+    def _upper_bounds(self, td: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        """Groesste moegliche Werte fertiger Plaene, fuer die exakte Hierarchie."""
+        jobs, ops = td["due"].shape[1], td["op_kind"].shape[1]
+        limit, extra = td["horizon"], ops * self.penalty
+        return {"total_tardiness": jobs * limit + extra, "late_jobs": torch.full_like(limit, jobs),
+                "max_tardiness": limit + extra, "makespan": limit}
+
+    def weights(self, td: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Gewicht je Instanz und Ebene (B, Ebenen) als float64."""
+        batch = td["due"].shape[0]
+        if self.level_weights is not None:
+            fixed = torch.tensor(self.level_weights, dtype=torch.float64, device=td["due"].device)
+            return fixed.expand(batch, -1)
+        bounds = self._upper_bounds(td)
+        weights = [torch.ones(batch, dtype=torch.float64, device=td["due"].device)]
+        for level in reversed(self.levels[1:]):
+            weights.insert(0, weights[0] * (bounds[level].to(torch.float64) + 1))
+        return torch.stack(weights, dim=1)
+
+    def cost(self, td: dict[str, torch.Tensor], completion: torch.Tensor) -> torch.Tensor:
+        """Kosten je Instanz (B) als float64: kleiner ist besser."""
+        values = self.level_values(td, completion)
+        stacked = torch.stack([values[level].to(torch.float64) for level in self.levels], dim=1)
+        return (stacked * self.weights(td)).sum(1)
+
+    def normalizer(self, td: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Teiler fuer den Reward, damit Instanzgroessen vergleichbar bleiben."""
+        return self.weights(td)[:, 0] * td["due"].shape[1] * self.scale

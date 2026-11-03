@@ -1,0 +1,6 @@
+# Getestet mit Python 3.12, torch 2.10 (CPU), matplotlib 3.10, tensorboard 2.21, pandas 2.3.
+# Auf dem Cluster torch passend zur dortigen CUDA-Version installieren.
+torch>=2.0
+matplotlib>=3.10   # Gantt-Diagramme und Vergleichsdiagramme
+tensorboard>=2.15  # Kurven im Browser (monitoring/); ohne das Paket schreibt das Monitoring nur CSV
+pandas>=2.0        # Vergleichsdiagramme (monitoring/comparison_plotter.py) und Tests

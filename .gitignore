@@ -1,0 +1,23 @@
+# Python
+__pycache__/
+*.pyc
+
+# Instanzen: aus den Seeds neu erzeugen mit
+# python generator.py --classes all --splits test val --processes 10
+instances/
+
+# Ergebnisse: entstehen beim Training und bei run_experiments.py
+experiments/
+results/
+runs/
+*.pt
+
+# Ausgaben und Archive
+*.log
+nohup.out
+*.zip
+
+# Jupyter und Editor
+.ipynb_checkpoints/
+.vscode/
+.idea/
