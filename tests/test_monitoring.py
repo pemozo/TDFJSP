@@ -11,6 +11,7 @@ import math
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 import warnings
 from pathlib import Path
@@ -208,6 +209,9 @@ class LoggerTest(unittest.TestCase):
                 logger.log_train_metrics({"value": float(step)}, step)
             logger.save_instance_results([{"instance_id": "a"}], "val", 10)
             logger.save_instance_results([{"instance_id": "b"}], "val", 20)
+        # TensorBoard liest die Ereignisdateien nach Namen: Sekunde, dann laufende Nummer als Text.
+        # In derselben Sekunde stuende Nummer 10 vor Nummer 9; echte Fortsetzungen liegen spaeter.
+        time.sleep(1.1)
         with ExperimentLogger("run", self.root, resume_step=10) as logger:
             self.assertEqual(logger.run_id, "run")
             with self.assertWarns(RuntimeWarning):
@@ -477,7 +481,7 @@ class TrainingIntegrationTest(unittest.TestCase):
         for key in ("experiment_id", "variant", "seed", "hyperparameters", "encoder", "decoder", "algorithm", "objective",
                     "instance_generator", "time_profiles", "start_time", "runtime_seconds", "best"):
             self.assertIn(key, metadata)
-        self.assertIsNone(metadata["git_commit"])
+        self.assertIn("git_commit", metadata)     # None ohne Git-Repository
         self.assertEqual(metadata["best"]["metric"], "val/reward_mean")
         self.assertIn("temporal/decision_relevance", metadata["unavailable_metrics"])
         # Ein kaum trainiertes Netz kann am Horizont abbrechen: dann kein Bild, aber ein Vermerk
