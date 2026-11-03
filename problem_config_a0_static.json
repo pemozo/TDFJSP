@@ -1,0 +1,166 @@
+{
+  "schema_version": 1,
+
+  "time_model": {
+    "_comment": "Zeit in ganzen Arbeitsminuten. Naechte sind ausgeblendet: Tag 1 = [0, day_minutes), Tag 2 = [day_minutes, 2*day_minutes), ... Die Anzahl Tage legt jede Instanz selbst fest.",
+    "unit": "minute",
+    "origin": "06:00",
+    "day_minutes": 720,
+    "day_windows": [
+      {"start": 0,   "end": 180, "factor": 1.0,  "label": "06:00-09:00"},
+      {"start": 180, "end": 240, "factor": 1.3,  "label": "09:00-10:00"},
+      {"start": 240, "end": 360, "factor": 1.2,  "label": "10:00-12:00"},
+      {"start": 360, "end": 390, "factor": null, "label": "12:00-12:30 Pause"},
+      {"start": 390, "end": 480, "factor": 1.6,  "label": "12:30-14:00"},
+      {"start": 480, "end": 600, "factor": 1.3,  "label": "14:00-16:00"},
+      {"start": 600, "end": 720, "factor": 1.1,  "label": "16:00-18:00"}
+    ],
+    "_comment_factor": "factor = Multiplikator auf die Basisdauer zeitabhaengiger Taetigkeiten; null = Pause (kein Personal verfuegbar).",
+    "duration_rounding": "ceil",
+    "duration_fixed_at_start": true
+  },
+
+  "rules": {
+    "_comment": "Taetigkeitsarten: manual = manuelle Operation an einem Handarbeitsplatz, automatic = automatische Operation auf einer Maschine, setup = Ruestung einer Ressource.",
+    "non_preemptive": true,
+    "time_dependent":    {"manual": true,  "automatic": false, "setup": true},
+    "allowed_in_break":  {"manual": false, "automatic": true,  "setup": false},
+    "allowed_overnight": {"manual": false, "automatic": false, "setup": false},
+    "setup_requires_worker": false,
+    "setups_on_manual_stations": false,
+    "initial_setup_minutes": 0,
+    "station_worker_mapping": "one_to_one",
+    "one_task_per_resource_at_a_time": true,
+    "setup_directly_before_operation_on_same_resource": true,
+    "job_operations_in_order": true,
+    "_comment_due": "due_dates_hard = false: Verspaetungen sind erlaubt und werden gemessen (evaluation.py). true: jede Verspaetung macht einen Schedule unzulaessig. Bewertungsschalter, nicht Teil des Fingerprints.",
+    "due_dates_hard": false
+  },
+
+  "generation": {
+    "_comment": "Parameter des Instanzgenerators (keine Scheduling-Regeln).",
+    "min_jobs": 2,
+    "release": 0,
+    "kind_pattern": "alternating",
+    "manual_processing_range": [20, 40],
+    "manual_same_duration_on_all_stations": true,
+    "automatic_processing_range": [30, 60],
+    "automatic_machine_deviation": 0.2,
+    "setup_range": [5, 15],
+    "first_automatic_on_all_machines": true,
+    "flexible_probability": 0.7,
+    "due_slack": 0.05,
+    "schedule_attempts": 50,
+    "_comment_failures": "Klassen-Modus: Seeds ohne zulaessigen Referenz-Plan werden uebersprungen. Nach so vielen Fehlschlaegen in Folge bricht der Generator ab (Klasse passt nicht in die Tage).",
+    "max_consecutive_seed_failures": 200
+  },
+
+  "simulation": {
+    "_comment": "Ausfuehrung von Plaenen fuer Regeln und RL-Umgebung. overflow_days = Zusatztage nach dem Horizont der Instanz; Deadlines bleiben unveraendert.",
+    "overflow_days": 1
+  },
+
+  "instance_classes": {
+    "_comment": "Alle Instanzgroessen: Hauptstufe 11/16/21 Jobs, hohe Auslastung 12/18/24 Jobs. Neue Klasse: hier eintragen, dann python generator.py --classes NAME --splits test val. Optional je Klasse: due_slack, schedule_attempts (ueberschreiben den Wert aus generation).",
+    "klein_11":  {"jobs": 11, "operations_per_job": 5, "workers": 2, "machines": 4, "days": 1},
+    "mittel_16": {"jobs": 16, "operations_per_job": 5, "workers": 3, "machines": 6, "days": 1},
+    "gross_21":  {"jobs": 21, "operations_per_job": 5, "workers": 4, "machines": 8, "days": 1},
+    "klein_12":  {"jobs": 12, "operations_per_job": 5, "workers": 2, "machines": 4, "days": 1},
+    "mittel_18": {"jobs": 18, "operations_per_job": 5, "workers": 3, "machines": 6, "days": 1},
+    "gross_24":  {"jobs": 24, "operations_per_job": 5, "workers": 4, "machines": 8, "days": 1}
+  },
+
+  "data_splits": {
+    "_comment": "train: neue Instanzen on the fly. val/test: feste Dateien; folder ist relativ zu dieser Datei, {class} = Klassenname. Instanz i bekommt den i-ten erzeugbaren Seed ab seed_start. Die Seed-Bereiche duerfen sich nicht ueberschneiden.",
+    "train": {"source": "on_the_fly", "seed_start": 1000000},
+    "val":   {"source": "files", "folder": "instances/val/{class}",  "seed_start": 100000, "count": 50},
+    "test":  {"source": "files", "folder": "instances/test/{class}", "seed_start": 42,     "count": 100}
+  },
+
+  "experiments": {
+    "_comment": "Auswertung der Dispatching-Regeln (run_experiments.py) und von Policies in der Umgebung (rl/evaluate.py). classes: \"all\" oder Liste von Klassen. Dateien sind relativ zu dieser Datei.",
+    "classes": "all",
+    "split": "test",
+    "methods": [
+      {"sequencing": "EDD", "routing": "ECT", "view": "static"},
+      {"sequencing": "EDD", "routing": "ECT", "view": "time_aware"},
+      {"sequencing": "EDD", "routing": "SPT", "view": "static"},
+      {"sequencing": "EDD", "routing": "SPT", "view": "time_aware"}
+    ],
+    "results_file": "results/baselines.csv",
+    "summary_file": "results/baselines_summary.csv",
+    "policy_results_file": "results/policies.csv",
+    "policy_summary_file": "results/policies_summary.csv",
+    "policy_seed": 12345,
+    "evaluation_batch_size": 1
+  },
+
+  "environment": {
+    "_comment": "RL-Umgebung (rl/env.py). train_classes: \"all\" oder Liste; der Generator wechselt je Batch die Klasse. view: time_aware oder static. allow_wait: Aktion 0 = warten bis zum naechsten Ereignis. device: auto, cpu oder cuda. generator_workers: Prozesse fuer das Erzeugen on the fly (0 = im Hauptprozess). time_scale_minutes teilt alle Zeit-Merkmale. truncation_penalty_minutes: Strafe je offener Operation, wenn der Horizont nicht reicht.",
+    "train_classes": "all",
+    "view": "static",
+    "allow_wait": true,
+    "device": "auto",
+    "batch_size": 32,
+    "generator_workers": 0,
+    "compute_features": true,
+    "time_scale_minutes": 60,
+    "truncation_penalty_minutes": 720
+  },
+
+  "reward": {
+    "_comment": "Hierarchisches Ziel: levels von wichtig nach unwichtig; erlaubt sind total_tardiness, late_jobs, max_tardiness, makespan. level_weights = null: exakt lexikografisch (eine Einheit einer hoeheren Ebene wiegt mehr als jeder Wert der tieferen). Liste gleicher Laenge: stattdessen gewichtete Summe. mode: terminal (Reward nur am Ende) oder stepwise (Aenderung der geschaetzten Kosten je Schritt). scale_minutes: Reward = -Kosten / (Gewicht der obersten Ebene * Jobs * scale_minutes).",
+    "levels": ["total_tardiness", "makespan"],
+    "level_weights": null,
+    "mode": "stepwise",
+    "scale_minutes": 60
+  },
+
+  "model": {
+    "_comment": "Neuronales Netz (rl/policy.py). variant: A0 statischer Encoder + statischer Decoder, A1 statischer Encoder + zeitbewusster Decoder, A2 zeitabhaengige Attention ohne Edge-Values + zeitbewusster Decoder, A3 zeitabhaengige Attention und Edge-Values + zeitbewusster Decoder. time_information: full oder none (Agent ohne Zeitfaktoren und Uhrzeit; die Umgebung rechnet weiter mit echten Dauern). Freiwilliges Warten steuert environment.allow_wait.",
+    "variant": "A0",
+    "time_information": "none",
+    "d_model": 128,
+    "num_layers": 3,
+    "num_heads": 4,
+    "hidden_dim": 128
+  },
+
+  "training": {
+    "_comment": "PPO (rl/ppo.py, rl/train.py). Die Klassen kommen aus environment.train_classes, jede Iteration nimmt die naechste Klasse. reward_scale multipliziert nur die Zahlen fuer das Lernen, die Rangfolge der Ziele bleibt gleich. validation_instances: die ersten N Validierungsinstanzen je Klasse, immer dieselben. validation_decode: greedy oder sample. best_metric: Kennzahl fuer best.pt, eine aus val/reward_mean, val/tardiness_mean, val/makespan_mean, val/window_compliance. output_folder ist relativ zu dieser Datei.",
+    "seed": 0,
+    "iterations": 500,
+    "instances_per_iteration": 32,
+    "ppo_epochs": 3,
+    "minibatch_size": 256,
+    "learning_rate": 0.0002,
+    "gamma": 1.0,
+    "gae_lambda": 0.95,
+    "clip_range": 0.2,
+    "value_coef": 0.5,
+    "entropy_coef": 0.01,
+    "max_grad_norm": 1.0,
+    "reward_scale": 10.0,
+    "validate_every": 20,
+    "validation_instances": 20,
+    "validation_decode": "greedy",
+    "best_metric": "val/reward_mean",
+    "output_folder": "experiments/checkpoints"
+  },
+
+  "monitoring": {
+    "_comment": "Experiment-Tracking (monitoring/). enabled: false schaltet alles aus, das Training laeuft unveraendert. folder: Ablage fuer tensorboard, results, figures, relativ zu dieser Datei. flush_seconds: so oft erscheinen neue Werte in TensorBoard. log_every_updates: train/* und ppo/* je so viele Optimizer-Schritte. temporal_every_validations, gantt_every_validations: je so viele Validierungen, die letzte immer. gantt_instances: so viele feste Validierungsinstanzen fuer Gantt-Diagramme. save_train_instances: eine Zeile je Trainingsinstanz. test_after_training: bestes Modell am Ende auf dem Testdatensatz auswerten. test_instances: null = alle, sonst die ersten N je Klasse. static_reference: Regel fuer temporal/*_gain, statisch geplant und mit echten Dauern ausgefuehrt; null = keine.",
+    "enabled": true,
+    "folder": "experiments",
+    "flush_seconds": 30,
+    "log_every_updates": 20,
+    "temporal_every_validations": 1,
+    "gantt_every_validations": 5,
+    "gantt_instances": 3,
+    "gantt_to_tensorboard": true,
+    "save_train_instances": true,
+    "test_after_training": true,
+    "test_instances": null,
+    "static_reference": {"sequencing": "EDD", "routing": "ECT", "view": "static"}
+  }
+}
