@@ -289,7 +289,8 @@ class TDFJSPEnv:
 
         setup, setup_allowed = self.time_model.duration(SETUP, setup_base, now, limit)
         kinds = td["op_kind"].gather(1, next_op).unsqueeze(2).expand_as(base)
-        processing, processing_allowed = self.time_model.duration(kinds, base, now + setup, limit)
+        resource = torch.arange(resources, device=base.device).view(1, 1, -1).expand_as(base)
+        processing, processing_allowed = self.time_model.duration(kinds, base, now + setup, limit, resource)
 
         free = td["busy_until"].unsqueeze(1) <= time.unsqueeze(2)
         ready = (td["job_ready"] <= time) & ~td["job_complete"]

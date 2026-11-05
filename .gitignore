@@ -5,12 +5,18 @@ __pycache__/
 # Instanzen: aus den Seeds neu erzeugen mit
 # python generator.py --classes all --splits test val --processes 10
 instances/
+instances_zeitprofil/
 
 # Ergebnisse: entstehen beim Training und bei run_experiments.py
 experiments/
+experiments_zeitprofil/
 results/
+results_zeitprofil/
 runs/
 *.pt
+
+# Abbildungen fuers Paper: nur lokal
+paper/
 
 # Ausgaben und Archive
 *.log

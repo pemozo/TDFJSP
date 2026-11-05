@@ -21,7 +21,8 @@ def estimate_completion(td: dict[str, torch.Tensor], time_model: TimeModel) -> t
 
     Fertige Jobs: echte Fertigstellung. Naechste Operation: beste Ressource mit Belegung
     und Ruestung vom aktuellen Vorgaenger. Weitere Operationen: kleinste Basisdauer und
-    kleinste Ruestung. Andere Jobs, die spaeter um Ressourcen konkurrieren, zaehlen nicht."""
+    kleinste Ruestung, bei Profilen je Handarbeitsplatz mit dem Bezugsprofil, denn der Platz steht
+    noch nicht fest. Andere Jobs, die spaeter um Ressourcen konkurrieren, zaehlen nicht."""
     time = td["time"].unsqueeze(1)
     ready = torch.maximum(td["job_ready"], time)
     next_op, complete = td["next_op"], td["job_complete"]
@@ -30,7 +31,8 @@ def estimate_completion(td: dict[str, torch.Tensor], time_model: TimeModel) -> t
     kinds = td["op_kind"].gather(1, next_op).unsqueeze(2).expand_as(base)
     earliest = torch.maximum(ready.unsqueeze(2), td["busy_until"].unsqueeze(1))
     after_setup = time_model.finish_after(SETUP, td["opt_setup_base"], earliest)
-    finish = time_model.finish_after(kinds, base, after_setup)
+    resource = torch.arange(base.shape[2], device=base.device).view(1, 1, -1).expand_as(base)
+    finish = time_model.finish_after(kinds, base, after_setup, resource)
     finish = finish.masked_fill(base == 0, torch.iinfo(torch.long).max)
     estimate = torch.where(complete, td["job_ready"], finish.amin(2))
 

@@ -48,17 +48,18 @@ _FEASIBILITY_STEPS = 64     # mehr Fenstergrenzen liegen nie vor einem zulaessig
 
 
 def _plan_at(time_model: TimeModel, kinds: torch.Tensor, base: torch.Tensor, setup_base: torch.Tensor,
-             time: torch.Tensor, limit: torch.Tensor):
+             time: torch.Tensor, limit: torch.Tensor, resource: torch.Tensor | None = None):
     """Ruestdauer, Bearbeitungsdauer und Zulaessigkeit bei Ruestbeginn `time`, wie
     simulator.plan_operation: Die Bearbeitung beginnt direkt nach der Ruestung, mit dem dort
     geltenden Faktor."""
     setup, setup_ok = time_model.duration(SETUP, setup_base, time, limit)
-    processing, processing_ok = time_model.duration(kinds, base, time + setup, limit)
+    processing, processing_ok = time_model.duration(kinds, base, time + setup, limit, resource)
     return setup, processing, setup_ok & processing_ok
 
 
 def first_feasible(time_model: TimeModel, kinds: torch.Tensor, base: torch.Tensor,
-                   setup_base: torch.Tensor, earliest: torch.Tensor, limit: torch.Tensor):
+                   setup_base: torch.Tensor, earliest: torch.Tensor, limit: torch.Tensor,
+                   resource: torch.Tensor | None = None):
     """Fruehester zulaessiger Ruestbeginn >= earliest je Element, wie simulator.first_feasible_start.
 
     Solange Ruest- und Bearbeitungsbeginn im selben Fenster bleiben, sind beide Dauern fest. Wer in
@@ -66,7 +67,7 @@ def first_feasible(time_model: TimeModel, kinds: torch.Tensor, base: torch.Tenso
     zum Ende des Abschnitts statt einer Suche ueber jede Minute.
     Rueckgabe: Beginn, Ruestdauer, Bearbeitungsdauer, gefunden."""
     time = earliest.clone()
-    setup, processing, allowed = _plan_at(time_model, kinds, base, setup_base, time, limit)
+    setup, processing, allowed = _plan_at(time_model, kinds, base, setup_base, time, limit, resource)
     for _ in range(_FEASIBILITY_STEPS):
         open_ = ~allowed & (time < limit)
         if not open_.any():
@@ -77,7 +78,8 @@ def first_feasible(time_model: TimeModel, kinds: torch.Tensor, base: torch.Tenso
         setup_window, _ = time_model.next_boundary(now + length, limit[index])
         time[index] = torch.minimum(window, setup_window - length)
         new_setup, new_processing, new_allowed = _plan_at(
-            time_model, kinds[index], base[index], setup_base[index], time[index], limit[index])
+            time_model, kinds[index], base[index], setup_base[index], time[index], limit[index],
+            None if resource is None else resource[index])
         setup[index], processing[index], allowed[index] = new_setup, new_processing, new_allowed
     return time, setup, processing, allowed
 
@@ -101,7 +103,8 @@ class ObservationBuilder:
         proc = td["proc_times"].transpose(1, 2)
         eligible = proc > 0
         kinds = td["op_kind"].unsqueeze(2).expand_as(proc)
-        lengths = self.time_model.window_profile(kinds, proc).to(torch.float32)
+        resource = torch.arange(proc.shape[2], device=proc.device).view(1, 1, -1).expand_as(proc)
+        lengths = self.time_model.window_profile(kinds, proc, resource).to(torch.float32)
         profiles = lengths / proc.clamp(min=1).unsqueeze(-1).to(torch.float32)
 
         job, order = td["ops_job_map"], td["ops_sequence_order"]
@@ -167,7 +170,8 @@ class ObservationBuilder:
 
         earliest = torch.maximum(torch.maximum(td["job_ready"].unsqueeze(2), td["busy_until"].unsqueeze(1)),
                                  batch_now)
-        start, setup, processing, found = first_feasible(model, kinds, base, setup_base, earliest, limit)
+        resource = torch.arange(base.shape[2], device=base.device).view(1, 1, -1).expand_as(base)
+        start, setup, processing, found = first_feasible(model, kinds, base, setup_base, earliest, limit, resource)
         finish = start + setup + processing
 
         # Geschaetzte Restarbeit des Jobs nach dieser Operation, aus der Sicht des Agenten
@@ -182,7 +186,7 @@ class ObservationBuilder:
         boundary, _ = model.next_boundary(now, td["horizon"])
         waited = torch.maximum(earliest, boundary.view(-1, 1, 1))
         wait_start, wait_setup, wait_processing, wait_found = first_feasible(
-            model, kinds, base, setup_base, waited, limit)
+            model, kinds, base, setup_base, waited, limit, resource)
         wait_finish = wait_start + wait_setup + wait_processing
         gain = torch.where(wait_found & found, wait_finish - finish, torch.zeros_like(finish))
 

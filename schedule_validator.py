@@ -124,7 +124,33 @@ def check_config(config: dict) -> list[str]:
         "rules.job_operations_in_order = false": not rules["job_operations_in_order"],
     }
     errors += [f"nicht unterstuetzt: {name}" for name, bad in unsupported.items() if bad]
-    return errors + _check_settings(config)
+    return errors + _check_resource_factors(config) + _check_settings(config)
+
+
+def _check_resource_factors(config: dict) -> list[str]:
+    """time_model.resource_factors (optional): je Handarbeitsplatz und fuer die Ruestung eine Liste mit einem
+    Faktor je Zeitfenster; Pausen an denselben Stellen wie in day_windows."""
+    tm = config["time_model"]
+    profiles = tm.get("resource_factors")
+    if profiles is None:
+        return []
+    stations, setup = profiles.get("manual_stations"), profiles.get("setup")
+    if not stations or setup is None:
+        return ["time_model.resource_factors braucht manual_stations und setup"]
+    errors = []
+    breaks = [w["factor"] is None for w in tm["day_windows"]]
+    named = [(f"manual_stations[{i}]", values) for i, values in enumerate(stations)] + [("setup", setup)]
+    for name, values in named:
+        if len(values) != len(breaks) or [v is None for v in values] != breaks:
+            errors.append(f"time_model.resource_factors.{name} braucht je Zeitfenster einen Wert "
+                          "und null genau in den Pausen")
+        elif any(v is not None and v <= 0 for v in values):
+            errors.append(f"time_model.resource_factors.{name}: Faktoren muessen positiv sein")
+    for name, c in instance_classes(config).items():
+        if isinstance(c.get("workers"), int) and c["workers"] > len(stations):
+            errors.append(f"instance_classes.{name}: {c['workers']} Handarbeitsplaetze, aber nur "
+                          f"{len(stations)} Profile in time_model.resource_factors.manual_stations")
+    return errors
 
 
 def _check_settings(config: dict) -> list[str]:
@@ -270,12 +296,26 @@ def setup_resources(config: dict, instance: dict) -> list[str]:
     return resources
 
 
-def factor_at(config: dict, t: int) -> float | None:
-    """Zeitfaktor zum Zeitpunkt t; None = Pause."""
+def station_index(config: dict, instance: dict, resource: str | None) -> int | None:
+    """Position von `resource` unter den Handarbeitsplaetzen, wenn es Profile je Platz gibt, sonst None."""
+    if resource is None or "resource_factors" not in config["time_model"]:
+        return None
+    stations = instance["resources"]["manual_stations"]
+    return stations.index(resource) if resource in stations else None
+
+
+def factor_at(config: dict, t: int, kind: str | None = None, station: int | None = None) -> float | None:
+    """Zeitfaktor zum Zeitpunkt t; None = Pause. Mit time_model.resource_factors gilt fuer Ruestungen das
+    Ruestprofil und fuer manuelle Operationen das Profil des Handarbeitsplatzes `station`; sonst day_windows."""
     tm = config["time_model"]
     offset = t % tm["day_minutes"]
-    for w in tm["day_windows"]:
+    profiles = tm.get("resource_factors")
+    for index, w in enumerate(tm["day_windows"]):
         if w["start"] <= offset < w["end"]:
+            if profiles and kind == "setup":
+                return profiles["setup"][index]
+            if profiles and kind == "manual" and station is not None:
+                return profiles["manual_stations"][station][index]
             return w["factor"]
     raise ValueError(f"Kein Zeitfenster fuer Minute {t}")
 
@@ -303,13 +343,14 @@ def interval_violation(config: dict, instance: dict, kind: str,
     return None
 
 
-def duration(config: dict, instance: dict, kind: str, base_minutes: int, start: int) -> int:
-    """Tatsaechliche Dauer einer Taetigkeit mit Start `start`.
-    Wirft ValueError, wenn sie zu diesem Zeitpunkt nicht starten darf."""
+def duration(config: dict, instance: dict, kind: str, base_minutes: int, start: int,
+             resource: str | None = None) -> int:
+    """Tatsaechliche Dauer einer Taetigkeit mit Start `start`; `resource` waehlt bei Profilen je
+    Handarbeitsplatz das richtige Profil. Wirft ValueError, wenn sie zu diesem Zeitpunkt nicht starten darf."""
     if config["rules"]["time_dependent"][kind]:
         if not 0 <= start < horizon(config, instance):
             raise ValueError(f"{KIND_NAMES[kind]}: Start ausserhalb des Planungshorizonts")
-        factor = factor_at(config, start)
+        factor = factor_at(config, start, kind, station_index(config, instance, resource))
         if factor is None:
             raise ValueError(f"{KIND_NAMES[kind]} darf nicht in der Pause starten")
         result = math.ceil(base_minutes * factor - 1e-9)  # Dauer beim Start festgelegt
@@ -336,7 +377,7 @@ def processing_duration(config: dict, instance: dict, op_id: str, resource: str,
         raise KeyError(f"Unbekannte Operation: {op_id}")
     if resource not in op["base_processing"]:
         raise ValueError(f"{op_id} darf nicht auf {resource} laufen")
-    return duration(config, instance, op["kind"], op["base_processing"][resource], start)
+    return duration(config, instance, op["kind"], op["base_processing"][resource], start, resource)
 
 
 def setup_duration(config: dict, instance: dict, resource: str, previous: str | None,

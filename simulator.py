@@ -77,6 +77,10 @@ def view_config(config: dict, view: str) -> dict:
         for window in static["time_model"]["day_windows"]:
             if window["factor"] is not None:
                 window["factor"] = 1.0
+        profiles = static["time_model"].get("resource_factors")
+        if profiles:
+            for values in (*profiles["manual_stations"], profiles["setup"]):
+                values[:] = [None if value is None else 1.0 for value in values]
         return static
     raise ValueError(f"Unbekannte Dauer-Sicht '{view}', erlaubt: {DURATION_VIEWS}")
 
@@ -88,21 +92,21 @@ def setup_lookup(instance: dict) -> dict[tuple[str, str, str], int]:
 
 
 def plan_operation(config: dict, instance: dict, kind: str, base: int,
-                   setup_minutes: int, start: int) -> tuple[int, int]:
+                   setup_minutes: int, start: int, resource: str | None = None) -> tuple[int, int]:
     """(Ruestdauer, Bearbeitungsdauer), wenn die Ruestung bei `start` beginnt
     und die Bearbeitung direkt folgt. ValueError bei einem Regelverstoss."""
     setup_len = duration(config, instance, "setup", setup_minutes, start) if setup_minutes else 0
-    return setup_len, duration(config, instance, kind, base, start + setup_len)
+    return setup_len, duration(config, instance, kind, base, start + setup_len, resource)
 
 
-def first_feasible_start(config: dict, instance: dict, kind: str, base: int,
-                         setup_minutes: int, earliest: int) -> tuple[int, int, int] | None:
+def first_feasible_start(config: dict, instance: dict, kind: str, base: int, setup_minutes: int,
+                         earliest: int, resource: str | None = None) -> tuple[int, int, int] | None:
     """Fruehester Zeitpunkt t >= earliest, zu dem Ruestung und direkt folgende
     Bearbeitung regelkonform sind. Liefert (t, Ruestdauer, Bearbeitungsdauer)
     oder None, wenn bis zum Horizontende nichts mehr passt."""
     for t in range(earliest, horizon(config, instance)):
         try:
-            return (t, *plan_operation(config, instance, kind, base, setup_minutes, t))
+            return (t, *plan_operation(config, instance, kind, base, setup_minutes, t, resource))
         except ValueError:
             continue
     return None
@@ -209,7 +213,7 @@ class SimulationState:
             try:
                 setup_len, process_len = plan_operation(
                     self.config, self.instance, op["kind"], op["base_processing"][resource],
-                    setup[1] if setup else 0, self.time)
+                    setup[1] if setup else 0, self.time, resource)
             except ValueError:
                 continue  # wuerde gegen eine Regel verstossen (Pause, Arbeitsende, ...)
             result.append(make_entry(op_id, resource, setup, self.time, setup_len, process_len))
@@ -314,7 +318,7 @@ def execute_plan(config: dict, instance: dict, plan: dict,
             found = first_feasible_start(config, exec_instance, op["kind"],
                                          op["base_processing"][resource],
                                          setup[1] if setup else 0,
-                                         max(resource_free[resource], job_ready[job["id"]]))
+                                         max(resource_free[resource], job_ready[job["id"]]), resource)
             if found is None:
                 raise SimulationError(f"{op['id']} passt auch mit den Zusatztagen "
                                       f"nicht mehr in den Horizont")

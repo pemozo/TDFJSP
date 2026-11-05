@@ -405,6 +405,7 @@ Diese Datei steuert das ganze Projekt. Schlüssel, die mit `_` beginnen (`_comme
 | `origin` | `"06:00"` | Uhrzeit von Minute 0 jedes Tages (nur für die Anzeige) |
 | `day_minutes` | `720` | Länge eines Arbeitstages |
 | `day_windows` | Liste | Zeitfenster eines Tages mit `start`, `end`, `factor`. `factor: null` = Pause. Sie müssen den Tag lückenlos abdecken. |
+| `resource_factors` | optional | Eigene Zeitprofile: `manual_stations` mit einer Liste je Handarbeitsplatz (erste Liste H1, zweite H2 usw.) und `setup` für die Rüstung, auf allen Maschinen gleich. Jede Liste hat einen Faktor je Zeitfenster, `null` genau in den Pausen. Fehlt der Schlüssel, gilt für alle `day_windows.factor`. Ist er gesetzt, ist `day_windows.factor` nur noch das Bezugsprofil für die Uhrzeit-Merkmale und für die Schätzung noch nicht zugeordneter manueller Operationen. |
 | `duration_rounding` | `"ceil"` | Rundung der zeitabhängigen Dauer (auf ganze Minuten aufrunden) |
 | `duration_fixed_at_start` | `true` | Faktor zum Startzeitpunkt gilt für die ganze Tätigkeit |
 

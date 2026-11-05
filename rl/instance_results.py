@@ -17,7 +17,7 @@ import torch
 
 from baselines.dispatcher import run_dispatcher
 from evaluation import evaluate, makespan
-from monitoring.schedule_metrics import start_shares, temporal_variability, time_metrics
+from monitoring.schedule_metrics import start_shares, temporal_variability, time_metrics, worker_metrics
 from rl.env import TDFJSPEnv
 from rl.generators import TDFJSPFileGenerator
 from rl.policies import Policy, rollout
@@ -120,7 +120,11 @@ def evaluate_instances(env: TDFJSPEnv, policy: Policy, instances: list[dict], in
         if not truncated:
             row["feasible"] = evaluate(rules, execution_instance(env.config, instance), schedule)["feasible"]
             voluntary = sum(end - start for _, start, end in recorder.intervals[index])
+            stations = instance["resources"]["manual_stations"]
+            row["station_voluntary_idle_time"] = sum(wait["end"] - wait["start"] for wait in waits
+                                                     if wait["resource"] in stations)
             row.update(time_metrics(rules, instance, schedule, voluntary))
+            row.update(worker_metrics(rules, instance, schedule))
             row.update(start_shares(rules, schedule))
         results.append(InstanceResult(row, schedule, waits, instance, [e["start"] for e in schedule]))
     return results
@@ -157,6 +161,7 @@ def rule_rows(config: dict, generator: TDFJSPFileGenerator, class_name: str, cou
                    window_compliance=1 - result["late_jobs"] / result["jobs"], truncated=False,
                    feasible=result["feasible"], inference_time=time.perf_counter() - start, inference_batch_size=1)
         row.update(time_metrics(config, instance, executed, None))
+        row.update(worker_metrics(config, instance, executed))
         rows.append(row)
     return rows
 

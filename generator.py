@@ -297,7 +297,7 @@ def _place(config: dict, instance: dict, op: dict, resource: str, earliest: int,
     direkt darauf (simulator.first_feasible_start). Liefert den
     Schedule-Eintrag oder None, wenn nichts mehr in den Horizont passt."""
     found = first_feasible_start(config, instance, op["kind"], op["base_processing"][resource],
-                                 setup[1] if setup else 0, earliest)
+                                 setup[1] if setup else 0, earliest, resource)
     return None if found is None else make_entry(op["id"], resource, setup, *found)
 
 
