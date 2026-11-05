@@ -43,10 +43,11 @@ REQUIRED_SECTIONS = ("time_model", "rules", "generation", "simulation", "instanc
                      "monitoring")
 # Erlaubte Werte der Umgebungs-Einstellungen
 ENVIRONMENT_VIEWS = ("time_aware", "static")
-REWARD_LEVELS = ("total_tardiness", "late_jobs", "max_tardiness", "makespan")
+REWARD_LEVELS = ("total_tardiness", "late_jobs", "max_tardiness", "makespan",
+                 "manual_profile_regret", "machine_flow_time")
 REWARD_MODES = ("terminal", "stepwise")
 MODEL_VARIANTS = ("A0", "A1", "A2", "A3")
-TIME_INFORMATION = ("full", "none")
+TIME_INFORMATION = ("full", "none", "mean")
 VALIDATION_DECODES = ("greedy", "sample")
 # Moegliche Kennzahlen fuer das beste Modell und ob groesser besser ist
 BEST_METRICS = {"val/reward_mean": True, "val/tardiness_mean": False, "val/makespan_mean": False,
@@ -86,6 +87,8 @@ def config_fingerprint(config: dict) -> str:
     speichert ihn, damit sie nicht versehentlich mit geaenderten Regeln
     geprueft wird."""
     relevant = {key: _strip_comments(config[key]) for key in ("time_model", "rules")}
+    if "_instance_base_time_model" in config:
+        relevant["time_model"] = _strip_comments(config["_instance_base_time_model"])
     for key in EVALUATION_SWITCHES:
         relevant["rules"].pop(key, None)
     return hashlib.sha256(json.dumps(relevant, sort_keys=True).encode()).hexdigest()[:16]
@@ -124,7 +127,96 @@ def check_config(config: dict) -> list[str]:
         "rules.job_operations_in_order = false": not rules["job_operations_in_order"],
     }
     errors += [f"nicht unterstuetzt: {name}" for name, bad in unsupported.items() if bad]
-    return errors + _check_resource_factors(config) + _check_settings(config)
+    return (errors + _check_resource_factors(config) + _check_instance_profile_settings(config)
+            + _check_settings(config))
+
+
+def _check_instance_profile_settings(config: dict) -> list[str]:
+    settings = config.get("generation", {}).get("instance_time_profiles")
+    if settings is None:
+        return []
+    prefix = "generation.instance_time_profiles"
+    if not isinstance(settings, dict) or not isinstance(settings.get("enabled", False), bool):
+        return [f"{prefix} braucht ein Objekt mit enabled als bool"]
+    allowed = {"enabled", "min_factor", "max_factor", "jitter"}
+    errors = [f"{prefix}: unbekannter Schluessel {key}" for key in settings
+              if not key.startswith("_") and key not in allowed]
+    low, high, jitter = (settings.get("min_factor", 1.0), settings.get("max_factor", 1.8),
+                         settings.get("jitter", 0.05))
+    if any(isinstance(v, bool) or not isinstance(v, (int, float)) or not math.isfinite(v)
+           for v in (low, high, jitter)):
+        return errors + [f"{prefix}: min_factor, max_factor und jitter muessen endliche Zahlen sein"]
+    if not 0 < low < high:
+        errors.append(f"{prefix}: 0 < min_factor < max_factor erforderlich")
+    if not 0 <= jitter <= max(0, high - low) / 2:
+        errors.append(f"{prefix}: jitter muss zwischen 0 und der halben Faktorspanne liegen")
+    if settings.get("enabled") and sum(w["factor"] is not None for w in config["time_model"]["day_windows"]) < 2:
+        errors.append(f"{prefix}: mindestens zwei Arbeitszeitfenster erforderlich")
+    return errors
+
+
+def _instance_profile_errors(config: dict, instance: dict) -> list[str]:
+    """Validate instance-owned profiles without applying them or changing data."""
+    profiles = instance.get("time_profiles")
+    if "time_profiles" not in instance:
+        if (config.get("generation", {}).get("instance_time_profiles") or {}).get("enabled", False):
+            return ["time_profiles fehlen: Diese Konfiguration verlangt eigene Zeitprofile je Instanz"]
+        return []
+    if not isinstance(profiles, dict):
+        return ["time_profiles muss ein Objekt mit manual_stations und setup sein"]
+    stations, setup = profiles.get("manual_stations"), profiles.get("setup")
+    expected = len(instance["resources"]["manual_stations"])
+    if not isinstance(stations, list) or len(stations) != expected:
+        return [f"time_profiles.manual_stations braucht genau {expected} Profile"]
+    errors = []
+    breaks = [w["factor"] is None for w in config["time_model"]["day_windows"]]
+    named = [(f"manual_stations[{i}]", row) for i, row in enumerate(stations)] + [("setup", setup)]
+    for name, row in named:
+        if not isinstance(row, list) or len(row) != len(breaks) or [v is None for v in row] != breaks:
+            errors.append(f"time_profiles.{name} braucht je Fenster einen Wert und null genau in den Pausen")
+        elif any(v is not None and (isinstance(v, bool) or not isinstance(v, (int, float))
+                                    or not math.isfinite(v) or v <= 0) for v in row):
+            errors.append(f"time_profiles.{name}: Faktoren muessen endlich und positiv sein")
+    return errors
+
+
+def time_profile_id(profiles: dict) -> str:
+    """Stable ID of exact serialized profile values (no float-tensor rounding)."""
+    encoded = json.dumps(profiles, sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(encoded.encode()).hexdigest()[:16]
+
+
+def instance_config(config: dict, instance: dict) -> dict:
+    """Resolve per-instance factors without mutating the configuration or instance.
+
+    Calendar boundaries and breaks remain shared.  The reference factor is the
+    mean of this instance's station factors.  A static duration view explicitly
+    keeps every available factor at one.  Repeated calls with an already bound
+    configuration are cheap; the private source reference is never serialized.
+    """
+    profiles = instance.get("time_profiles")
+    if profiles is None:
+        errors = _instance_profile_errors(config, instance)
+        if errors:
+            raise ValueError("; ".join(errors))
+        return config
+    if config.get("_instance_time_profiles") is profiles:
+        return config
+    errors = _instance_profile_errors(config, instance)
+    if errors:
+        raise ValueError("; ".join(errors))
+    static = config.get("_duration_view") == "static"
+    rows = [[None if v is None else (1.0 if static else v) for v in row]
+            for row in profiles["manual_stations"]]
+    setup = [None if v is None else (1.0 if static else v) for v in profiles["setup"]]
+    windows = [{**window, "factor": (None if window["factor"] is None else
+                                    sum(row[i] for row in rows) / len(rows))}
+               for i, window in enumerate(config["time_model"]["day_windows"])]
+    return {**config,
+            "time_model": {**config["time_model"], "day_windows": windows,
+                           "resource_factors": {"manual_stations": rows, "setup": setup}},
+            "_instance_base_time_model": config.get("_instance_base_time_model", config["time_model"]),
+            "_instance_time_profiles": profiles}
 
 
 def _check_resource_factors(config: dict) -> list[str]:
@@ -192,6 +284,11 @@ def _check_settings(config: dict) -> list[str]:
     if not levels or len(set(levels)) != len(levels) or set(levels) - set(REWARD_LEVELS):
         errors.append(f"reward.levels braucht verschiedene Werte aus {REWARD_LEVELS}")
     weights = reward["level_weights"]
+    normalization = reward.get("normalization", "legacy")
+    if normalization not in ("legacy", "per_entity"):
+        errors.append("reward.normalization muss legacy oder per_entity sein")
+    if normalization == "per_entity" and weights is None:
+        errors.append("reward.normalization=per_entity braucht explizite level_weights")
     if weights is not None and (len(weights) != len(levels) or min(weights) <= 0):
         errors.append("reward.level_weights muss null sein oder je Ebene ein Gewicht > 0 haben")
     if reward["mode"] not in REWARD_MODES:
@@ -202,6 +299,11 @@ def _check_settings(config: dict) -> list[str]:
         errors.append(f"model.variant muss eines von {MODEL_VARIANTS} sein")
     if model["time_information"] not in TIME_INFORMATION:
         errors.append(f"model.time_information muss eines von {TIME_INFORMATION} sein")
+    if not isinstance(model.get("flow_features", False), bool):
+        errors.append("model.flow_features muss bool sein")
+    wait_bias = model.get("initial_wait_bias")
+    if wait_bias is not None and (not isinstance(wait_bias, (int, float)) or not math.isfinite(wait_bias)):
+        errors.append("model.initial_wait_bias muss null oder eine endliche Zahl sein")
     if model["num_heads"] < 1 or model["d_model"] % model["num_heads"]:
         errors.append("model.d_model muss durch model.num_heads teilbar sein")
     training = config["training"]
@@ -213,6 +315,14 @@ def _check_settings(config: dict) -> list[str]:
         errors.append(f"training.best_metric muss eines von {tuple(BEST_METRICS)} sein")
     if training["validation_decode"] not in VALIDATION_DECODES:
         errors.append(f"training.validation_decode muss eines von {VALIDATION_DECODES} sein")
+    if training.get("target_kl") is not None and (not math.isfinite(training["target_kl"]) or training["target_kl"] <= 0):
+        errors.append("training.target_kl muss null oder positiv und endlich sein")
+    decay = training.get("learning_rate_decay_iterations", 0)
+    if not isinstance(decay, int) or decay < 0:
+        errors.append("training.learning_rate_decay_iterations muss eine nichtnegative ganze Zahl sein")
+    end_fraction = training.get("learning_rate_end_fraction", 0.2)
+    if not 0 < end_fraction <= 1:
+        errors.append("training.learning_rate_end_fraction muss in (0,1] liegen")
 
     monitoring = config["monitoring"]
     for key in ("flush_seconds", "log_every_updates", "temporal_every_validations", "gantt_every_validations"):
@@ -347,6 +457,7 @@ def duration(config: dict, instance: dict, kind: str, base_minutes: int, start: 
              resource: str | None = None) -> int:
     """Tatsaechliche Dauer einer Taetigkeit mit Start `start`; `resource` waehlt bei Profilen je
     Handarbeitsplatz das richtige Profil. Wirft ValueError, wenn sie zu diesem Zeitpunkt nicht starten darf."""
+    config = instance_config(config, instance)
     if config["rules"]["time_dependent"][kind]:
         if not 0 <= start < horizon(config, instance):
             raise ValueError(f"{KIND_NAMES[kind]}: Start ausserhalb des Planungshorizonts")
@@ -412,6 +523,11 @@ def validate_instance(config: dict, instance: dict) -> list[str]:
     if expected != config_fingerprint(config):
         return ["Instanz wurde mit anderen Regeln erzeugt als in der aktuellen "
                 "problem_config (Fingerprint passt nicht oder altes Instanzformat)"]
+
+    profile_errors = _instance_profile_errors(config, instance)
+    if profile_errors:
+        return profile_errors
+    config = instance_config(config, instance)
 
     operations = {o["id"]: o for o in instance["operations"]}
     return (_check_header(instance, operations)
@@ -495,6 +611,10 @@ def check_schedule(config: dict, instance: dict, schedule: list[dict]) -> list[s
 
     Format je Eintrag: {"op", "resource", "start", "end"} und auf Ressourcen
     mit Ruestung zusaetzlich {"setup_from", "setup_start", "setup_end"}."""
+    try:
+        config = instance_config(config, instance)
+    except ValueError as exc:
+        return [str(exc)]
     by_op = {e["op"]: e for e in schedule}
     if len(by_op) != len(schedule) or set(by_op) != {o["id"] for o in instance["operations"]}:
         return ["Jede Operation muss genau einmal eingeplant sein"]

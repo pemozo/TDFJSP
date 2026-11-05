@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import colorsys
+import hashlib
 import json
 import math
 import multiprocessing
@@ -31,9 +32,10 @@ from pathlib import Path
 
 from evaluation import job_completion, makespan
 from schedule_validator import (DEFAULT_CONFIG, all_resources, check_schedule,
-                                config_fingerprint, horizon, instance_classes, load_config,
+                                _check_instance_profile_settings, config_fingerprint, horizon,
+                                instance_classes, instance_config, load_config,
                                 selected_classes, setup_resources, split_folder,
-                                validate_instance)
+                                time_profile_id, validate_instance)
 from simulator import first_feasible_start, make_entry, setup_lookup
 
 
@@ -57,6 +59,9 @@ def generate_instance(seed: int = 42, n_jobs: int = 5, n_machines: int = 5,
     Wirft ValueError, wenn die Instanz nicht in den Horizont passt."""
     if config is None:
         config = load_config(config_path)
+    profile_errors = _check_instance_profile_settings(config)
+    if profile_errors:
+        raise ValueError("; ".join(profile_errors))
     gen = config["generation"]
     due_slack = gen["due_slack"] if due_slack is None else due_slack
     schedule_attempts = gen["schedule_attempts"] if schedule_attempts is None else schedule_attempts
@@ -82,6 +87,11 @@ def generate_instance(seed: int = 42, n_jobs: int = 5, n_machines: int = 5,
         "setups": [],
     }
     instance["setups"] = _generate_setups(rng, gen, config, instance)
+    profile_settings = gen.get("instance_time_profiles") or {}
+    if profile_settings.get("enabled", False):
+        instance["time_profiles"] = _generate_time_profiles(config, instance, n_ops)
+        instance["time_profile_id"] = time_profile_id(instance["time_profiles"])
+    config = instance_config(config, instance)
 
     # Loesbarkeit per Konstruktion (vgl. Dumas et al. 1995 fuer TSPTW):
     # erst einen zulaessigen Referenz-Schedule bauen, dann die Deadlines
@@ -90,6 +100,51 @@ def generate_instance(seed: int = 42, n_jobs: int = 5, n_machines: int = 5,
     _assign_due_dates(rng, config, instance, schedule, due_slack)
     instance["reference_schedule"] = schedule
     return instance
+
+
+def _generate_time_profiles(config: dict, instance: dict, n_ops: int) -> dict:
+    """Deterministic instance-owned profiles, using a separate random stream.
+
+    Circular phase shifts preserve the template's rhythm on working windows;
+    amplitude and small jitter vary the slowdown.  Breaks never move, and the
+    best windows stay at min_factor.  Job durations, eligibility and setup base
+    times retain their original random stream when this feature is enabled.
+    """
+    errors = _check_instance_profile_settings(config)
+    if errors:
+        raise ValueError("; ".join(errors))
+    settings = config["generation"]["instance_time_profiles"]
+    low, high, jitter = settings.get("min_factor", 1.0), settings.get("max_factor", 1.8), settings.get("jitter", 0.05)
+    stations = instance["resources"]["manual_stations"]
+    seed_data = ["instance_time_profiles_v1", instance["seed"], len(instance["jobs"]), n_ops,
+                 len(stations), len(instance["resources"]["machines"]), instance["days"]]
+    profile_seed = int.from_bytes(hashlib.sha256(json.dumps(seed_data).encode()).digest(), "big")
+    profile_rng = random.Random(profile_seed)
+    windows = config["time_model"]["day_windows"]
+    working = [i for i, window in enumerate(windows) if window["factor"] is not None]
+    base = [window["factor"] for window in windows]
+    templates = config["time_model"].get("resource_factors", {})
+    station_templates = templates.get("manual_stations", [base])
+
+    def sample(template: list) -> list:
+        values = [template[i] for i in working]
+        minimum, maximum = min(values), max(values)
+        if maximum == minimum:
+            shape = [float(i % 3 == 2) for i in range(len(values))]
+            shape[-1] = 1.0
+        else:
+            shape = [(value - minimum) / (maximum - minimum) for value in values]
+        phase = profile_rng.randrange(len(shape))
+        shape = shape[phase:] + shape[:phase]
+        amplitude = profile_rng.uniform(0.65, 1.0) * (high - low)
+        profile = [None] * len(windows)
+        for index, fraction in zip(working, shape):
+            value = low if fraction == 0 else low + amplitude * fraction + profile_rng.uniform(-jitter, jitter)
+            profile[index] = min(high, max(low, round(value, 6)))
+        return profile
+
+    return {"manual_stations": [sample(station_templates[i % len(station_templates)]) for i in range(len(stations))],
+            "setup": sample(templates.get("setup", base))}
 
 
 def _check_arguments(gen: dict, n_jobs: int, n_machines: int, n_ops: int,
@@ -243,6 +298,7 @@ def build_reference_schedule(config: dict, instance: dict,
     und zwar am fruehesten zulaessigen Zeitpunkt nach dem letzten Auftrag
     dieser Ressource (Luecken werden nicht aufgefuellt).
     Liefert None, wenn nicht alles in den Horizont passt."""
+    config = instance_config(config, instance)
     ops = {o["id"]: o for o in instance["operations"]}
     setup_base = setup_lookup(instance)
     with_setup = set(setup_resources(config, instance))
@@ -471,6 +527,7 @@ def plot_schedule(config: dict, instance: dict, schedule: list[dict], title: str
     from matplotlib.lines import Line2D
     from matplotlib.patches import Patch
 
+    config = instance_config(config, instance)
     resources = all_resources(instance)
     end_of_horizon = horizon(config, instance)
     days = instance["days"]

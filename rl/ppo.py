@@ -112,9 +112,10 @@ def ppo_update(model: ActorCritic, optimizer: torch.optim.Optimizer, rollout: Ro
     explained_variance aus den Werten der Datensammlung (fehlt, wenn die Returns nicht streuen)."""
     model.train()
     count = rollout.action.shape[0]
-    advantage = (rollout.advantage - rollout.advantage.mean()) / (rollout.advantage.std() + 1e-8)
+    advantage = (rollout.advantage - rollout.advantage.mean()) / (rollout.advantage.std(unbiased=count > 1) + 1e-8)
     totals = {key: 0.0 for key in ("policy_loss", "value_loss", "entropy", "approx_kl", "clip_fraction", "grad_norm")}
     seen = 0
+    stopped = False
     for _ in range(settings["ppo_epochs"]):
         order = torch.randperm(count, device=rollout.action.device)
         for first in range(0, count, settings["minibatch_size"]):
@@ -128,6 +129,11 @@ def ppo_update(model: ActorCritic, optimizer: torch.optim.Optimizer, rollout: Ro
             distribution = Categorical(logits=logits)
             log_ratio = distribution.log_prob(rollout.action[chosen]) - rollout.log_prob[chosen]
             ratio = torch.exp(log_ratio)
+            approximate_kl = ((ratio - 1) - log_ratio).mean()
+            target_kl = settings.get("target_kl")
+            if target_kl is not None and approximate_kl.detach().item() > 1.5 * target_kl:
+                stopped = True
+                break
             gain = advantage[chosen]
             clipped = torch.clamp(ratio, 1 - settings["clip_range"], 1 + settings["clip_range"])
             policy_loss = -torch.min(ratio * gain, clipped * gain).mean()
@@ -151,6 +157,8 @@ def ppo_update(model: ActorCritic, optimizer: torch.optim.Optimizer, rollout: Ro
             seen += samples
             if on_update is not None:
                 on_update(metrics, samples)
+        if stopped:
+            break
     result = {key: total / max(seen, 1) for key, total in totals.items()}
     variance = explained_variance(rollout.values, rollout.returns)
     if variance is not None:

@@ -21,6 +21,7 @@ Ablauf (siehe simulator.py fuer die festgelegten Annahmen):
 from __future__ import annotations
 
 from baselines.rules import ROUTING_RULES, SEQUENCING_RULES
+from schedule_validator import instance_config
 from simulator import (DURATION_VIEWS, SimulationError, SimulationState,
                        execute_plan, plan_from_schedule)
 
@@ -55,6 +56,7 @@ def run_dispatcher(config: dict, instance: dict, sequencing: str, routing: str,
     view      : "static" oder "time_aware"
     Rueckgabe : {"planned": Plan in der Sicht des Verfahrens,
                  "executed": Schedule, wie er mit echten Dauern ablaeuft}"""
+    config = instance_config(config, instance)
     planned = build_plan(config, instance, sequencing, routing, view)
     executed = execute_plan(config, instance, plan_from_schedule(planned))
     return {"planned": planned, "executed": executed}

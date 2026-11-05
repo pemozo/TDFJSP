@@ -1,5 +1,10 @@
 # Instanzgenerator für ein zeitabhängiges flexibles Job-Shop-Problem
 
+**Neue Versuchsreihe:** [Instanzeigene Zeitprofile und kontrollierter RL-Vergleich](PROFILE_GENERALIZATION.md)
+beschreibt `problem_config_generalization.json`: wechselnde Profile je Instanz,
+zusätzliche Maschinenversorgungsmerkmale, normalisierte Lernziele und einen
+gepaarten Vergleich mit zeitlich konstanten Durchschnittsprofilen.
+
 Dieses Projekt erzeugt **lösbare Testinstanzen** für ein flexibles Job-Shop-Scheduling-Problem (FJSP) mit **zeitabhängigen Bearbeitungszeiten**, **reihenfolgeabhängigen Rüstzeiten**, **Pausen**, **Arbeitsende** und **Deadlines**. Ein unabhängiger **Validator** prüft Instanzen und beliebige Schedules gegen dieselben Regeln, eine **Bewertung** misst Makespan und Verspätungen. Ein **Simulator** führt Pläne mit den echten, zeitabhängigen Dauern aus, und erste **Baselines** (EDD + ECT, EDD + SPT, jeweils statisch und zeitbewusst) lassen sich auf sechs Instanzklassen mit je 100 Testinstanzen auswerten. Eine **RL-Umgebung** und ein **zeitabhängiges HetGNN mit PPO** (`rl/`) stehen bereit; das vollständige Training steht noch aus.
 
 Alle Regeln, das Zeitmodell, die Instanzgrößen und die Einstellungen der Umgebung stehen an **einer Stelle**: in `problem_config.json`. Der Code enthält selbst keine Regeln.

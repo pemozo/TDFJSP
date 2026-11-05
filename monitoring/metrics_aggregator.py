@@ -9,6 +9,8 @@ from __future__ import annotations
 import math
 from typing import Iterable
 
+from monitoring.schedule_metrics import PLAN_METRIC_NAMES
+
 
 class MetricsAggregator:
     """Gewichtetes Mittel und Standardabweichung je Kennzahl seit dem letzten reset."""
@@ -83,7 +85,8 @@ def summarize_instances(rows: list[dict]) -> dict[str, float | None]:
             "setup_time_total_mean": _mean(rows, "setup_time_total"),
             "processing_time_total_mean": _mean(rows, "processing_time_total"),
             "feasibility_rate": sum(bool(row.get("feasible")) for row in rows) / len(rows),
-            "inference_time_mean": _mean(rows, "inference_time")}
+            "inference_time_mean": _mean(rows, "inference_time"),
+            **{f"{name}_mean": _mean(rows, name) for name in PLAN_METRIC_NAMES}}
 
 
 def summarize_temporal(rows: list[dict]) -> dict[str, float | None]:
@@ -99,6 +102,7 @@ def summarize_temporal(rows: list[dict]) -> dict[str, float | None]:
                "mean_processing_factor": _mean(rows, "mean_processing_factor"),
                "mean_setup_factor": _mean(rows, "mean_setup_factor"),
                "temporal_variability_mean": _mean(rows, "temporal_variability")}
+    summary.update({f"{name}_mean": _mean(rows, name) for name in PLAN_METRIC_NAMES})
     for key in dict.fromkeys(key for row in rows for key in row if key.startswith("start_share_")):
         summary[f"start_share/{key.removeprefix('start_share_')}"] = _mean(rows, key)
     return summary

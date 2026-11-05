@@ -13,7 +13,7 @@ from __future__ import annotations
 
 import torch
 
-from rl.time_model import SETUP, TimeModel
+from rl.time_model import KIND_IDS, SETUP, TimeModel
 
 
 def estimate_completion(td: dict[str, torch.Tensor], time_model: TimeModel) -> torch.Tensor:
@@ -61,6 +61,39 @@ class HierarchicalCost:
         self.level_weights = reward["level_weights"]
         self.scale = reward["scale_minutes"]
         self.penalty = config["environment"]["truncation_penalty_minutes"]
+        self.normalization = reward.get("normalization", "legacy")
+        self.config = config
+
+    def _manual_regret(self, td: dict[str, torch.Tensor]) -> torch.Tensor:
+        """Realized manual minutes above the assigned station's best feasible window.
+
+        This is processing efficiency, not a reward for waiting. Waiting can still
+        increase tardiness, makespan and automatic completion times.
+        """
+        resource = td["op_resource"].clamp(min=0)
+        base = td["proc_times"].gather(1, resource.unsqueeze(1)).squeeze(1)
+        profiles = td["time_profile_factors"][:, :-1]
+        station = resource.clamp(max=profiles.shape[1] - 1)
+        factors = profiles.gather(1, station.unsqueeze(-1).expand(-1, -1, profiles.shape[-1]))
+        durations = torch.ceil(base.unsqueeze(-1).to(torch.float64) * factors - 1e-9).to(torch.long)
+        if not self.config["rules"]["time_dependent"]["manual"]:
+            durations = base.unsqueeze(-1).expand_as(durations)
+        windows = self.config["time_model"]["day_windows"]
+        day = self.config["time_model"]["day_minutes"]
+        rules = self.config["rules"]
+        room = []
+        for w in windows:
+            ends = [day] if not rules["allowed_overnight"]["manual"] else [10 ** 12]
+            if not rules["allowed_in_break"]["manual"]:
+                ends += [b["start"] + offset for offset in (0, day) for b in windows
+                         if b["factor"] is None and b["start"] + offset >= w["start"]]
+            room.append(min(ends) - w["start"])
+        room = torch.tensor(room, device=base.device)
+        valid = (factors > 0) & (durations <= room)
+        lower = durations.masked_fill(~valid, torch.iinfo(torch.long).max).amin(-1)
+        actual = td["op_end"] - td["op_start"]
+        selected = td["op_scheduled"] & (td["op_kind"] == KIND_IDS["manual"])
+        return torch.where(selected, (actual - lower).clamp(min=0), 0).sum(1)
 
     def level_values(self, td: dict[str, torch.Tensor],
                      completion: torch.Tensor) -> dict[str, torch.Tensor]:
@@ -69,17 +102,24 @@ class HierarchicalCost:
         tardiness = (completion - td["due"]).clamp(min=0)
         open_ops = (~td["op_scheduled"]).sum(1)
         penalty = td["truncated"].to(torch.long) * open_ops * self.penalty
-        return {"total_tardiness": tardiness.sum(1) + penalty,
+        values = {"total_tardiness": tardiness.sum(1) + penalty,
                 "late_jobs": (tardiness > 0).sum(1),
                 "max_tardiness": tardiness.amax(1) + penalty,
                 "makespan": torch.minimum(completion.amax(1), td["horizon"])}
+        if "manual_profile_regret" in self.levels:
+            values["manual_profile_regret"] = self._manual_regret(td)
+        if "machine_flow_time" in self.levels:
+            automatic = td["op_scheduled"] & (td["op_kind"] == KIND_IDS["automatic"])
+            values["machine_flow_time"] = torch.where(automatic, td["op_end"], 0).sum(1)
+        return values
 
     def _upper_bounds(self, td: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         """Groesste moegliche Werte fertiger Plaene, fuer die exakte Hierarchie."""
         jobs, ops = td["due"].shape[1], td["op_kind"].shape[1]
         limit, extra = td["horizon"], ops * self.penalty
         return {"total_tardiness": jobs * limit + extra, "late_jobs": torch.full_like(limit, jobs),
-                "max_tardiness": limit + extra, "makespan": limit}
+                "max_tardiness": limit + extra, "makespan": limit,
+                "manual_profile_regret": ops * limit, "machine_flow_time": ops * limit}
 
     def weights(self, td: dict[str, torch.Tensor]) -> torch.Tensor:
         """Gewicht je Instanz und Ebene (B, Ebenen) als float64."""
@@ -97,8 +137,16 @@ class HierarchicalCost:
         """Kosten je Instanz (B) als float64: kleiner ist besser."""
         values = self.level_values(td, completion)
         stacked = torch.stack([values[level].to(torch.float64) for level in self.levels], dim=1)
+        if self.normalization == "per_entity":
+            ones = torch.ones_like(td["horizon"])
+            counts = {"total_tardiness": ones * td["due"].shape[1],
+                      "late_jobs": ones * td["due"].shape[1], "max_tardiness": ones, "makespan": ones,
+                      "manual_profile_regret": (td["op_kind"] == KIND_IDS["manual"]).sum(1).clamp(min=1),
+                      "machine_flow_time": (td["op_kind"] == KIND_IDS["automatic"]).sum(1).clamp(min=1)}
+            stacked = stacked / torch.stack([counts[level] for level in self.levels], dim=1)
         return (stacked * self.weights(td)).sum(1)
 
     def normalizer(self, td: dict[str, torch.Tensor]) -> torch.Tensor:
         """Teiler fuer den Reward, damit Instanzgroessen vergleichbar bleiben."""
-        return self.weights(td)[:, 0] * td["due"].shape[1] * self.scale
+        jobs = td["due"].shape[1] if self.normalization == "legacy" else 1
+        return self.weights(td)[:, 0] * jobs * self.scale

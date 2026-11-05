@@ -236,6 +236,13 @@ def train(config: dict, seed: int, iterations: int, config_path: Path, resume: P
                 log.writeheader()
             for iteration in range(progress.iteration + 1, iterations + 1):
                 start = time.perf_counter()
+                decay_steps = settings.get("learning_rate_decay_iterations", 0)
+                if decay_steps:
+                    fraction = min((iteration - 1) / max(decay_steps - 1, 1), 1.0)
+                    end_fraction = settings.get("learning_rate_end_fraction", 0.2)
+                    rate = settings["learning_rate"] * (1 - fraction * (1 - end_fraction))
+                    for group in optimizer.param_groups:
+                        group["lr"] = rate
                 class_name = env.generator.classes[(iteration - 1) % len(env.generator.classes)]
                 td = env.reset(env.generator(settings["instances_per_iteration"], class_name))
                 data = collect_rollout(env, model, builder, td, settings)
@@ -262,7 +269,7 @@ def train(config: dict, seed: int, iterations: int, config_path: Path, resume: P
                     progress.processed_instances, progress.elapsed_seconds + time.perf_counter() - start,
                     data.wait_share,
                     train_rows(env, data.final_state, data.wait_actions, data.decisions, class_name)
-                    if logger.enabled and config["monitoring"]["save_train_instances"] else None)
+                    if logger.enabled else None)
 
                 if iteration % settings["validate_every"] == 0 or iteration == iterations:
                     monitor.write_train(learning_rate, progress.global_step, progress.processed_instances,
@@ -281,7 +288,10 @@ def train(config: dict, seed: int, iterations: int, config_path: Path, resume: P
                               or (value > progress.best_value if BEST_METRICS[best_metric] else value < progress.best_value))
                     if better:
                         progress.best_value = value
-                    state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": None,
+                    schedule = ({"kind": "linear_by_iteration", "iterations": settings["learning_rate_decay_iterations"],
+                                 "end_fraction": settings.get("learning_rate_end_fraction", 0.2)}
+                                if settings.get("learning_rate_decay_iterations", 0) else None)
+                    state = {"model": model.state_dict(), "optimizer": optimizer.state_dict(), "scheduler": schedule,
                              "config": config, "name": name, "seed": seed, "iteration": iteration,
                              "global_step": progress.global_step, "validation": summary, "best_metric": best_metric,
                              "progress": {**asdict(progress),
@@ -317,8 +327,11 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="PPO-Training der RL-Umgebung")
     parser.add_argument("--variant", choices=["A0", "A1", "A2", "A3"], default=None,
                         help="Modellvariante (Standard: model.variant)")
-    parser.add_argument("--no-time-information", action="store_true",
+    information = parser.add_mutually_exclusive_group()
+    information.add_argument("--no-time-information", action="store_true",
                         help="Agent ohne Zeitinformation (model.time_information = none)")
+    information.add_argument("--mean-time-profiles", action="store_true",
+                            help="Kontrollmodell mit konstanten mittleren Faktoren; Uhrzeit und Deadlines bleiben bekannt")
     parser.add_argument("--no-wait", action="store_true", help="ohne freiwilliges Warten")
     parser.add_argument("--classes", nargs="+", default=None,
                         help="Instanzklassen (Standard: environment.train_classes)")
@@ -338,6 +351,8 @@ def main() -> int:
         config["model"]["variant"] = args.variant
     if args.no_time_information:
         config["model"]["time_information"] = "none"
+    if args.mean_time_profiles:
+        config["model"]["time_information"] = "mean"
     if args.no_wait:
         config["environment"]["allow_wait"] = False
     if args.classes:

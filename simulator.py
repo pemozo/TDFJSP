@@ -45,7 +45,7 @@ from __future__ import annotations
 
 import copy
 
-from schedule_validator import all_resources, duration, horizon, setup_resources
+from schedule_validator import all_resources, duration, horizon, instance_config, setup_resources
 
 DURATION_VIEWS = ("time_aware", "static")
 
@@ -74,6 +74,7 @@ def view_config(config: dict, view: str) -> dict:
         return config
     if view == "static":
         static = copy.deepcopy(config)
+        static["_duration_view"] = "static"
         for window in static["time_model"]["day_windows"]:
             if window["factor"] is not None:
                 window["factor"] = 1.0
@@ -95,6 +96,7 @@ def plan_operation(config: dict, instance: dict, kind: str, base: int,
                    setup_minutes: int, start: int, resource: str | None = None) -> tuple[int, int]:
     """(Ruestdauer, Bearbeitungsdauer), wenn die Ruestung bei `start` beginnt
     und die Bearbeitung direkt folgt. ValueError bei einem Regelverstoss."""
+    config = instance_config(config, instance)
     setup_len = duration(config, instance, "setup", setup_minutes, start) if setup_minutes else 0
     return setup_len, duration(config, instance, kind, base, start + setup_len, resource)
 
@@ -104,6 +106,7 @@ def first_feasible_start(config: dict, instance: dict, kind: str, base: int, set
     """Fruehester Zeitpunkt t >= earliest, zu dem Ruestung und direkt folgende
     Bearbeitung regelkonform sind. Liefert (t, Ruestdauer, Bearbeitungsdauer)
     oder None, wenn bis zum Horizontende nichts mehr passt."""
+    config = instance_config(config, instance)
     for t in range(earliest, horizon(config, instance)):
         try:
             return (t, *plan_operation(config, instance, kind, base, setup_minutes, t, resource))
@@ -147,7 +150,7 @@ class SimulationState:
     def __init__(self, config: dict, instance: dict, view: str = "time_aware",
                  overflow_days: int | None = None):
         self.view = view
-        self.config = view_config(config, view)
+        self.config = instance_config(view_config(config, view), instance)
         self.instance = execution_instance(config, instance, overflow_days)
         self.ops = {o["id"]: o for o in instance["operations"]}
         self.jobs = {j["id"]: j for j in instance["jobs"]}
@@ -283,6 +286,7 @@ def execute_plan(config: dict, instance: dict, plan: dict,
     ihres Vorgaengers im Job und des vorherigen Auftrags auf ihrer Ressource
     (Ruestung zuerst, Bearbeitung direkt danach). SimulationError, wenn der
     Plan auch mit Zusatztag nicht ausfuehrbar ist."""
+    config = instance_config(config, instance)
     exec_instance = execution_instance(config, instance, overflow_days)
     ops = {o["id"]: o for o in instance["operations"]}
     assignment, sequence = plan["assignment"], plan["sequence"]

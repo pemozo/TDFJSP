@@ -17,11 +17,12 @@ import torch
 
 from baselines.dispatcher import run_dispatcher
 from evaluation import evaluate, makespan
-from monitoring.schedule_metrics import start_shares, temporal_variability, time_metrics, worker_metrics
+from monitoring.schedule_metrics import (machine_metrics, manual_profile_metrics, profile_metadata,
+                                         start_shares, temporal_variability, time_metrics, worker_metrics)
 from rl.env import TDFJSPEnv
 from rl.generators import TDFJSPFileGenerator
 from rl.policies import Policy, rollout
-from schedule_validator import all_resources
+from schedule_validator import all_resources, instance_config
 from simulator import SimulationError, execution_instance, view_config
 
 
@@ -94,16 +95,17 @@ def evaluate_instances(env: TDFJSPEnv, policy: Policy, instances: list[dict], in
     elapsed = (time.perf_counter() - start) / len(instances)
     rewards = env.get_reward(td)
     objectives = env.get_objectives(td)
-    rules = view_config(env.config, env.view)
 
     results = []
     for index, (instance, instance_id) in enumerate(zip(instances, instance_ids)):
+        rules = view_config(instance_config(env.config, instance), env.view)
         truncated = bool(td["truncated"][index])
         jobs = len(instance["jobs"])
         late_jobs = int(objectives["late_jobs"][index])
         schedule = [] if truncated else env.to_schedule(td, index, instance)
         waits = [] if truncated else _merged_waits(recorder.intervals[index], instance)
         row = {**_base_row(instance, instance_id, class_name, env.view),
+               **profile_metadata(env.config, instance),
                "temporal_variability": temporal_variability(env.config, instance),   # immer die echten Faktoren
                "reward": float(rewards[index]),
                "makespan": int(objectives["makespan"][index]),
@@ -125,6 +127,7 @@ def evaluate_instances(env: TDFJSPEnv, policy: Policy, instances: list[dict], in
                                                      if wait["resource"] in stations)
             row.update(time_metrics(rules, instance, schedule, voluntary))
             row.update(worker_metrics(rules, instance, schedule))
+            row.update(manual_profile_metrics(rules, instance, schedule))
             row.update(start_shares(rules, schedule))
         results.append(InstanceResult(row, schedule, waits, instance, [e["start"] for e in schedule]))
     return results
@@ -148,6 +151,7 @@ def rule_rows(config: dict, generator: TDFJSPFileGenerator, class_name: str, cou
     rows = []
     for path, instance in zip(generator.files[:count], generator.instances[:count]):
         row = _base_row(instance, f"{class_name}/{path.stem}", class_name, "time_aware")
+        row.update(profile_metadata(config, instance))
         row["temporal_variability"] = temporal_variability(config, instance)
         start = time.perf_counter()
         try:
@@ -162,13 +166,14 @@ def rule_rows(config: dict, generator: TDFJSPFileGenerator, class_name: str, cou
                    feasible=result["feasible"], inference_time=time.perf_counter() - start, inference_batch_size=1)
         row.update(time_metrics(config, instance, executed, None))
         row.update(worker_metrics(config, instance, executed))
+        row.update(manual_profile_metrics(config, instance, executed))
         rows.append(row)
     return rows
 
 
 def train_rows(env: TDFJSPEnv, td: dict[str, torch.Tensor], wait_actions: torch.Tensor,
                decisions: torch.Tensor, class_name: str) -> list[dict]:
-    """Zeilen je Trainingsinstanz, direkt aus dem Endzustand; Kennzahlen, die den Plan brauchen, bleiben leer."""
+    """Per-instance training metrics from final tensors; incomplete-plan diagnostics stay absent."""
     objectives = {key: value.tolist() for key, value in env.get_objectives(td).items()}
     rewards = env.get_reward(td).tolist()
     scheduled = td["op_scheduled"]
@@ -176,7 +181,7 @@ def train_rows(env: TDFJSPEnv, td: dict[str, torch.Tensor], wait_actions: torch.
     setup = ((td["op_start"] - td["op_decision"]) * scheduled).sum(1).tolist()
     jobs = td["due"].shape[1]
     operations = td["op_kind"].shape[1]
-    return [{"instance_id": f"{class_name}/seed_{seed}", "instance_class": class_name, "instance_seed": seed,
+    rows = [{"instance_id": f"{class_name}/seed_{seed}", "instance_class": class_name, "instance_seed": seed,
              "instance_size": operations, "jobs": jobs, "env_view": env.view, "reward": rewards[i],
              "makespan": objectives["makespan"][i], "total_tardiness": objectives["total_tardiness"][i],
              "max_tardiness": objectives["max_tardiness"][i], "late_jobs": objectives["late_jobs"][i],
@@ -184,3 +189,42 @@ def train_rows(env: TDFJSPEnv, td: dict[str, torch.Tensor], wait_actions: torch.
              "feasible": not objectives["truncated"][i], "processing_time_total": processing[i],
              "setup_time_total": setup[i], "wait_actions": int(wait_actions[i]), "decisions": int(decisions[i])}
             for i, seed in enumerate(td["seed"].tolist())]
+    # Assigned entries are sufficient for diagnostics; job/setup predecessor records
+    # are unnecessary and are not persisted as complete training schedules.
+    assigned = td["op_resource"].clamp(min=0)
+    bases = td["proc_times"].gather(1, assigned.unsqueeze(1)).squeeze(1).tolist()
+    values = {key: td[key].tolist() for key in ("is_station", "op_kind", "op_scheduled", "op_resource",
+                                               "op_decision", "op_start", "op_end", "horizon")}
+    profile_values = td["time_profile_factors"].tolist() if "time_profile_factors" in td else None
+    rules = view_config(env.config, env.view)
+    for i, row in enumerate(rows):
+        station_count = sum(values["is_station"][i])
+        machine_count = len(values["is_station"][i]) - station_count
+        stations = [f"H{k+1}" for k in range(station_count)]
+        machines = [f"M{k+1}" for k in range(machine_count)]
+        names = stations + machines
+        instance = {"resources": {"manual_stations": stations, "machines": machines},
+                    "days": max(1, (values["horizon"][i] + env.config["time_model"]["day_minutes"] - 1)
+                                // env.config["time_model"]["day_minutes"]), "operations": []}
+        if profile_values is not None:
+            profiles = [[None if value < 0 else value for value in profile] for profile in profile_values[i]]
+            instance["time_profiles"] = {"manual_stations": profiles[:station_count], "setup": profiles[-1]}
+        row.update(profile_metadata(env.config, instance))
+        if row["truncated"]:
+            continue
+        entries = []
+        for op in range(operations):
+            if not values["op_scheduled"][i][op]:
+                continue
+            resource = names[values["op_resource"][i][op]]
+            kind = "manual" if resource in stations else "automatic"
+            instance["operations"].append({"id": op, "kind": kind, "base_processing": {resource: bases[i][op]}})
+            entries.append({"op": op, "resource": resource, "start": values["op_start"][i][op],
+                            "end": values["op_end"][i][op], "setup_start": values["op_decision"][i][op],
+                            "setup_end": values["op_start"][i][op]})
+        row.update(machine_metrics(instance, entries))
+        row.update(manual_profile_metrics(rules, instance, entries))
+        manual_actual = sum(e["end"] - e["start"] for e in entries if e["resource"] in stations)
+        row["worker_busy_time"] = manual_actual
+        row["manual_extra_time"] = manual_actual - row["manual_base_time"]
+    return rows

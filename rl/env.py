@@ -45,7 +45,7 @@ FEATURE_NAMES = {"time_features": TIME_FEATURES, "op_features": OPERATION_FEATUR
 STATIC_KEYS = ("proc_times", "setup_times", "setup_resources", "is_station", "op_kind",
                "ops_job_map", "ops_sequence_order", "start_op_per_job", "end_op_per_job",
                "release", "due", "horizon", "seed", "num_eligible", "mean_proc_times",
-               "min_proc_times", "min_setup_times")
+               "min_proc_times", "min_setup_times", "time_profile_factors", "time_profile_reference")
 # Zustand, der sich aendert: wird je Schritt kopiert, fruehere Zustaende bleiben also gueltig
 _CHANGING_KEYS = ("time", "next_op", "job_ready", "job_complete", "busy_until", "last_op",
                   "op_scheduled", "op_resource", "op_predecessor", "op_decision", "op_start",
@@ -182,6 +182,7 @@ class TDFJSPEnv:
         batch, jobs = td["due"].shape
         resources, ops = td["proc_times"].shape[1:]
         device = td["due"].device
+        self.time_model.bind(td)
         largest = max(int(td["proc_times"].max().item()), int(td["setup_times"].max().item())
                       if td["setup_times"].numel() else 0, self.initial_setup)
         self.time_model.ensure_finish_table(largest)

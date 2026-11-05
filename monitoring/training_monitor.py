@@ -9,7 +9,7 @@ Eine Iteration umfasst viele Optimizer-Schritte, train/* kann also erst am Ende 
 from __future__ import annotations
 
 from monitoring.metrics_aggregator import MetricsAggregator, summarize_instances, summarize_temporal
-from monitoring.schedule_metrics import gain_metrics
+from monitoring.schedule_metrics import PLAN_METRIC_NAMES, gain_metrics
 
 DECISION_RELEVANCE_NOTE = ("keine verlaessliche Referenz: fuer die Instanzen gibt es keine bewiesen optimalen "
                            "Plaene; temporal_variability misst nur die rechnerische Streuung der Dauern")
@@ -53,6 +53,8 @@ class TrainingMonitor:
         self._episodes.add({"window_compliance": 1 - late_jobs / jobs}, jobs)
         self._episodes.add({"wait_share": wait_share}, len(episodes["reward"]))
         self._updates.add({"explained_variance": ppo.get("explained_variance")})
+        for row in rows or []:
+            self._episodes.add({name: row.get(name) for name in PLAN_METRIC_NAMES})
         if self.settings["save_train_instances"] and rows:
             self.logger.save_instance_results(rows, "train", step)
         every = self.settings["log_every_updates"]
@@ -70,7 +72,8 @@ class TrainingMonitor:
              "tardiness_mean": means["tardiness"], "window_compliance": means["window_compliance"],
              "feasibility_rate": means["feasible"], "episode_length": means["episode_length"],
              "wait_share": means["wait_share"], "learning_rate": learning_rate,
-             "processed_instances": processed_instances, "elapsed_seconds": elapsed_seconds}, step)
+             "processed_instances": processed_instances, "elapsed_seconds": elapsed_seconds,
+             **{f"{name}_mean": means[name] for name in PLAN_METRIC_NAMES if name in means}}, step)
         self._episodes.reset()
         self._last_train_step = step
 
@@ -83,6 +86,8 @@ class TrainingMonitor:
         rows = [result.row for result in results]
         self.logger.log_validation_metrics(summarize_instances(rows), step)
         self.logger.save_instance_results(rows, "val", step)
+        if self._save_schedules_for("val"):
+            self.logger.save_schedules(results, "val", step)
         if final or self.validations % self.settings["temporal_every_validations"] == 0:
             self._write_temporal(self.logger.log_temporal_metrics, results, step)
         if final or (self.validations - 1) % self.settings["gantt_every_validations"] == 0:
@@ -108,7 +113,13 @@ class TrainingMonitor:
             return
         rows = [result.row for result in results]
         self.logger.save_instance_results(rows, "test", step, replace=True)
+        if self._save_schedules_for("test"):
+            self.logger.save_schedules(results, "test", step, replace=True)
         self.logger.log_test_metrics(summarize_instances(rows), step)
         self.logger.log_test_metrics({f"temporal/{key}": value for key, value in summarize_temporal(rows).items()},
                                      step)
         self.logger.flush()
+
+    def _save_schedules_for(self, split: str) -> bool:
+        """Opt-in; test-only by default to avoid full plans at every validation."""
+        return bool(self.settings.get("save_schedules", False)) and split in self.settings.get("schedule_splits", ["test"])

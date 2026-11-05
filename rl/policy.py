@@ -24,7 +24,7 @@ from torch.distributions import Categorical
 from rl.decoder import StaticPairDecoder, TimeAwareDecoder
 from rl.encoder import HetGNNEncoder
 from rl.env import TDFJSPEnv
-from rl.observation import (CANDIDATE_FEATURES, MACHINE_FEATURES, OP_FEATURES, STATE_FEATURES,
+from rl.observation import (CANDIDATE_FEATURES, FLOW_CANDIDATE_FEATURES, MACHINE_FEATURES, OP_FEATURES, STATE_FEATURES,
                             ObservationBuilder)
 from rl.time_model import TIME_FEATURES
 
@@ -48,9 +48,14 @@ class ActorCritic(nn.Module):
         self.encoder = HetGNNEncoder(len(OP_FEATURES), len(MACHINE_FEATURES), num_windows, d_model,
                                      model_settings["num_layers"], model_settings["num_heads"], hidden,
                                      temporal, edge_values)
-        self.decoder = (TimeAwareDecoder(d_model, len(CANDIDATE_FEATURES), len(TIME_FEATURES),
+        candidate_dim = len(CANDIDATE_FEATURES) + (len(FLOW_CANDIDATE_FEATURES) if model_settings.get("flow_features", False) else 0)
+        self.decoder = (TimeAwareDecoder(d_model, candidate_dim, len(TIME_FEATURES),
                                          len(STATE_FEATURES), hidden)
                         if time_aware else StaticPairDecoder(d_model, hidden))
+        # Optional dispatch-first initialization, shared by both information views.
+        # WAIT remains available and fully trainable; old checkpoints retain their shape.
+        if time_aware and model_settings.get("initial_wait_bias") is not None:
+            nn.init.constant_(self.decoder.wait_score[-1].bias, model_settings["initial_wait_bias"])
         self.critic = nn.Sequential(nn.Linear(2 * d_model + len(TIME_FEATURES) + len(STATE_FEATURES), hidden),
                                     nn.ReLU(), nn.Linear(hidden, 1))
 
@@ -81,16 +86,18 @@ class NeuralPolicy:
         self.decode = decode
         self._generator = torch.Generator(device=env.device).manual_seed(seed)
         self._key = None
+        self._profile_key = None
         self._hidden = None
         self._pad_mask = None
 
     @torch.no_grad()
     def __call__(self, td: dict[str, torch.Tensor]) -> torch.Tensor:
-        if self._key is not td["proc_times"]:
+        if self._key is not td["proc_times"] or self._profile_key is not td.get("time_profile_factors"):
             static = self.builder.static_inputs(td)
             self._hidden = self.model.encode(static)
             self._pad_mask = static["pad_mask"]
             self._key = td["proc_times"]
+            self._profile_key = td.get("time_profile_factors")
         logits, _ = self.model(*self._hidden, self._pad_mask, self.builder.dynamic_inputs(td))
         if self.decode == "greedy":
             return logits.argmax(1)
@@ -100,7 +107,7 @@ class NeuralPolicy:
 
 def model_name(config: dict) -> str:
     """Name der Modellkonfiguration ohne Seed, z. B. A3_zeit_warten; gleich fuer alle Seeds."""
-    information = "zeit" if config["model"]["time_information"] == "full" else "ohnezeit"
+    information = {"full": "zeit", "none": "ohnezeit", "mean": "mittelprofil"}[config["model"]["time_information"]]
     waiting = "warten" if config["environment"]["allow_wait"] else "nondelay"
     return f"{config['model']['variant']}_{information}_{waiting}"
 

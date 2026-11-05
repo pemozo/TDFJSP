@@ -6,10 +6,13 @@ __pycache__/
 # python generator.py --classes all --splits test val --processes 10
 instances/
 instances_zeitprofil/
+instances_generalization/
 
 # Ergebnisse: entstehen beim Training und bei run_experiments.py
 experiments/
 experiments_zeitprofil/
+experiments_generalization/
+results_generalization/
 results/
 results_zeitprofil/
 runs/

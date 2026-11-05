@@ -25,6 +25,8 @@ import warnings
 from datetime import datetime, timezone
 from pathlib import Path
 
+from monitoring.schedule_metrics import METRIC_DEFINITIONS
+
 SCALAR_COLUMNS = ("step", "tag", "value", "elapsed_seconds")
 # Immer vorhanden und in dieser Reihenfolge; leer = nicht verfuegbar. Weitere Spalten kommen dahinter.
 INSTANCE_COLUMNS = ("run_id", "model", "seed", "step", "instance_id", "instance_size", "temporal_variability",
@@ -117,6 +119,7 @@ class ExperimentLogger:
         self._scalars_path = self.results_dir / "scalars.csv"
 
         self.metadata = self._initial_metadata(metadata or {}, resume_step)
+        self.metadata["metric_definitions"] = METRIC_DEFINITIONS
         self._runtime_before = self.metadata.get("runtime_seconds", 0.0) if resume_step is not None else 0.0
         self._started = time.perf_counter()
         if resume_step is not None:
@@ -162,6 +165,14 @@ class ExperimentLogger:
                 columns, rows = _read_rows(path)
                 kept = [row for row in rows if not row.get("step") or int(row["step"]) <= step]
                 _write_rows(path, columns, kept)
+        for path in self.results_dir.glob("*_schedules.jsonl"):
+            helper = path.with_name(path.name + ".tmp")
+            with path.open(encoding="utf-8") as source, helper.open("w", encoding="utf-8") as target:
+                for line in source:
+                    row = json.loads(line)
+                    if row.get("step") is None or int(row["step"]) <= step:
+                        target.write(line)
+            os.replace(helper, path)
         self._last_step = {group: step for group in ("train", "ppo", "val", "temporal", "test")}
 
     # --- Kennzahlen ------------------------------------------------------------
@@ -237,6 +248,30 @@ class ExperimentLogger:
         else:
             with path.open("a", newline="", encoding="utf-8") as file:
                 csv.DictWriter(file, fieldnames=columns, restval="").writerows(rows)
+        return path
+
+    def save_schedules(self, results: list, split: str = "test", step: int | None = None,
+                       replace: bool = False) -> Path:
+        """Persist complete evaluated plans and waits separately from scalar CSVs.
+
+        Instance IDs/seeds, raw instance profiles, and the run's saved configuration
+        identify their inputs. Validation plans are opt-in through TrainingMonitor.
+        """
+        path = self.results_dir / f"{split}_schedules.jsonl"
+        destination = path.with_name(path.name + ".tmp") if replace else path
+        with destination.open("w" if replace else "a", encoding="utf-8") as stream:
+            for result in results:
+                record = {"run_id": self.run_id, "model": self.metadata.get("model"),
+                          "seed": self.metadata.get("seed"), "step": step,
+                          "instance_id": result.row["instance_id"],
+                          "instance_seed": result.row.get("instance_seed"),
+                          "time_profile_id": result.row.get("time_profile_id"),
+                          "time_profile_hash": result.row.get("time_profile_hash"),
+                          "time_profiles": result.instance.get("time_profiles"),
+                          "metrics": result.row, "schedule": result.schedule, "waits": result.waits}
+                stream.write(json.dumps(record, ensure_ascii=False, allow_nan=False) + "\n")
+        if replace:
+            os.replace(destination, path)
         return path
 
     # --- Gantt-Diagramme --------------------------------------------------------

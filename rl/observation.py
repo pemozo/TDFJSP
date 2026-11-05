@@ -42,24 +42,27 @@ OP_FEATURES = ("mean_base_time", "min_base_time", "max_base_time", "is_manual", 
 MACHINE_FEATURES = ("is_manual_station", "eligible_share", "mean_base_time", "has_setup", "mean_setup")
 CANDIDATE_FEATURES = ("setup_start_offset", "setup_time", "processing_start_offset", "processing_time",
                       "finish_offset", "job_slack", "due_in", "feasible_now", "wait_gain")
+FLOW_CANDIDATE_FEATURES = ("resource_ready_work", "resource_remaining_work", "successor_release_delay",
+                           "successor_ready_work", "manual_profile_regret", "manual_next_window_saving")
 STATE_FEATURES = ("progress", "free_resources", "mean_busy_for", "open_jobs", "min_slack",
                   "mean_slack", "estimated_late_jobs")
 _FEASIBILITY_STEPS = 64     # mehr Fenstergrenzen liegen nie vor einem zulaessigen Start
 
 
 def _plan_at(time_model: TimeModel, kinds: torch.Tensor, base: torch.Tensor, setup_base: torch.Tensor,
-             time: torch.Tensor, limit: torch.Tensor, resource: torch.Tensor | None = None):
+             time: torch.Tensor, limit: torch.Tensor, resource: torch.Tensor | None = None,
+             batch_index: torch.Tensor | None = None):
     """Ruestdauer, Bearbeitungsdauer und Zulaessigkeit bei Ruestbeginn `time`, wie
     simulator.plan_operation: Die Bearbeitung beginnt direkt nach der Ruestung, mit dem dort
     geltenden Faktor."""
-    setup, setup_ok = time_model.duration(SETUP, setup_base, time, limit)
-    processing, processing_ok = time_model.duration(kinds, base, time + setup, limit, resource)
+    setup, setup_ok = time_model.duration(SETUP, setup_base, time, limit, batch_index=batch_index)
+    processing, processing_ok = time_model.duration(kinds, base, time + setup, limit, resource, batch_index)
     return setup, processing, setup_ok & processing_ok
 
 
 def first_feasible(time_model: TimeModel, kinds: torch.Tensor, base: torch.Tensor,
                    setup_base: torch.Tensor, earliest: torch.Tensor, limit: torch.Tensor,
-                   resource: torch.Tensor | None = None):
+                   resource: torch.Tensor | None = None, batch_index: torch.Tensor | None = None):
     """Fruehester zulaessiger Ruestbeginn >= earliest je Element, wie simulator.first_feasible_start.
 
     Solange Ruest- und Bearbeitungsbeginn im selben Fenster bleiben, sind beide Dauern fest. Wer in
@@ -67,7 +70,7 @@ def first_feasible(time_model: TimeModel, kinds: torch.Tensor, base: torch.Tenso
     zum Ende des Abschnitts statt einer Suche ueber jede Minute.
     Rueckgabe: Beginn, Ruestdauer, Bearbeitungsdauer, gefunden."""
     time = earliest.clone()
-    setup, processing, allowed = _plan_at(time_model, kinds, base, setup_base, time, limit, resource)
+    setup, processing, allowed = _plan_at(time_model, kinds, base, setup_base, time, limit, resource, batch_index)
     for _ in range(_FEASIBILITY_STEPS):
         open_ = ~allowed & (time < limit)
         if not open_.any():
@@ -79,7 +82,8 @@ def first_feasible(time_model: TimeModel, kinds: torch.Tensor, base: torch.Tenso
         time[index] = torch.minimum(window, setup_window - length)
         new_setup, new_processing, new_allowed = _plan_at(
             time_model, kinds[index], base[index], setup_base[index], time[index], limit[index],
-            None if resource is None else resource[index])
+            None if resource is None else resource[index],
+            index[0] if batch_index is None else torch.broadcast_to(batch_index, base.shape)[index])
         setup[index], processing[index], allowed[index] = new_setup, new_processing, new_allowed
     return time, setup, processing, allowed
 
@@ -91,10 +95,13 @@ class ObservationBuilder:
         self.env = env
         self.scale = float(env.time_scale)
         self.full_information = env.config["model"]["time_information"] == "full"
-        self.time_model = (env.time_model if self.full_information
-                           else TimeModel(env.config, "static", env.device))
+        self.hide_clock = env.config["model"]["time_information"] == "none"
+        self.flow_features = env.config["model"].get("flow_features", False)
+        self.time_model = (env.time_model if self.full_information else TimeModel(
+            env.config, "static" if self.hide_clock else "mean", env.device))
 
     def static_inputs(self, td: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
+        self.time_model.bind(td)
         largest = max(int(td["proc_times"].max().item()),
                       int(td["setup_times"].max().item()) if td["setup_times"].numel() else 0,
                       self.env.initial_setup)
@@ -131,7 +138,7 @@ class ObservationBuilder:
         work = (td["min_proc_times"] + td["min_setup_times"]).to(torch.float32)
         job_work = torch.zeros_like(td["due"], dtype=torch.float32).scatter_add_(1, job, work)
         due = td["due"].to(torch.float32).gather(1, job) / self.time_model.day
-        if not self.full_information:
+        if self.hide_clock:
             due = torch.zeros_like(due)     # zusammen mit dem Puffer ergaebe sie die Uhrzeit
         return torch.stack((td["mean_proc_times"] / scale,
                             td["min_proc_times"].to(torch.float32) / scale,
@@ -161,6 +168,7 @@ class ObservationBuilder:
 
     def dynamic_inputs(self, td: dict[str, torch.Tensor]) -> dict[str, torch.Tensor]:
         model, scale = self.time_model, self.scale
+        model.bind(td)
         now = td["time"]
         batch_now = now.view(-1, 1, 1)
         base, setup_base = td["opt_base"], td["opt_setup_base"]
@@ -200,9 +208,36 @@ class ObservationBuilder:
                                   scaled(due - batch_now),
                                   td["pair_mask"].to(torch.float32),
                                   scaled(gain)), dim=3)
+        if self.flow_features:
+            ready = valid & (td["job_ready"] <= now.unsqueeze(1)).unsqueeze(2)
+            ready_work = (base * ready).sum(1).to(torch.float32)
+            remaining = (~td["op_scheduled"]).unsqueeze(1)
+            divided_work = td["proc_times"].to(torch.float32) / td["num_eligible"].clamp(min=1).unsqueeze(1)
+            remaining_work = (divided_work * remaining).sum(2)
+            successor = (td["next_op"] + 1).clamp(max=td["op_kind"].shape[1] - 1)
+            has_successor = (td["next_op"] < td["end_op_per_job"]) & ~td["job_complete"]
+            automatic_successor = has_successor & (td["op_kind"].gather(1, successor) == KIND_IDS["automatic"])
+            successor_base = td["proc_times"].gather(2, successor.unsqueeze(1).expand(-1, base.shape[2], -1)).transpose(1, 2)
+            successor_eligible = (successor_base > 0) & automatic_successor.unsqueeze(2)
+            successor_free = td["busy_until"].unsqueeze(1).expand_as(base).masked_fill(~successor_eligible, torch.iinfo(torch.long).max).amin(2)
+            successor_free = torch.maximum(successor_free, now.unsqueeze(1))
+            release_delay = (finish - successor_free.unsqueeze(2)).clamp(min=0)
+            release_delay = torch.where(automatic_successor.unsqueeze(2), release_delay, 0)
+            successor_queue = ready_work.unsqueeze(1).expand_as(base).masked_fill(~successor_eligible, float("inf")).amin(2)
+            successor_queue = torch.where(automatic_successor, successor_queue, 0)
+            profiles = model.window_profile(kinds, base, resource)
+            best_duration = profiles.masked_fill(profiles == 0, torch.iinfo(torch.long).max).amin(-1)
+            manual = kinds == KIND_IDS["manual"]
+            regret = torch.where(manual, (processing - best_duration).clamp(min=0), 0)
+            savings = torch.where(manual, processing - wait_processing, 0)
+            extra = torch.stack((scaled(ready_work.unsqueeze(1).expand_as(base)),
+                                 scaled(remaining_work.unsqueeze(1).expand_as(base)),
+                                 scaled(release_delay), scaled(successor_queue.unsqueeze(2).expand_as(base)),
+                                 scaled(regret), scaled(savings)), dim=3)
+            candidates = torch.cat((candidates, extra), dim=3)
 
         time_features = model.time_features(now, td["horizon"], scale)
-        if not self.full_information:
+        if self.hide_clock:
             time_features = torch.zeros_like(time_features)
         return {"next_op": td["next_op"], "candidates": candidates, "candidate_valid": valid,
                 "time_features": time_features,

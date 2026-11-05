@@ -13,7 +13,7 @@ from __future__ import annotations
 import torch
 
 from rl.time_model import KIND_IDS
-from schedule_validator import all_resources, horizon, setup_resources
+from schedule_validator import all_resources, horizon, setup_resources, instance_config
 from simulator import execution_instance, make_entry
 
 _NO_SETUP = torch.iinfo(torch.int16).max
@@ -63,6 +63,17 @@ def _instance_to_tensors(config: dict, instance: dict) -> dict[str, torch.Tensor
         position += list(range(len(job["operations"])))
 
     exec_horizon = horizon(config, execution_instance(config, instance))
+    effective = instance_config(config, instance)
+    windows = effective["time_model"]["day_windows"]
+    reference = [w["factor"] for w in windows]
+    profiles = effective["time_model"].get("resource_factors")
+    stations = len(instance["resources"]["manual_stations"])
+    station_profiles = profiles["manual_stations"][:stations] if profiles else [reference] * stations
+    setup_profile = profiles["setup"] if profiles else reference
+
+    def factors(values):
+        return [-1.0 if value is None else float(value) for value in values]
+
     return {
         "proc_times": proc_times,
         "setup_times": setup_times,
@@ -79,6 +90,9 @@ def _instance_to_tensors(config: dict, instance: dict) -> dict[str, torch.Tensor
         "due": torch.tensor([job["due"] for job in jobs], dtype=torch.long),
         "horizon": torch.tensor(exec_horizon, dtype=torch.long),
         "seed": torch.tensor(instance["seed"], dtype=torch.long),
+        "time_profile_factors": torch.tensor([factors(row) for row in (*station_profiles, setup_profile)],
+                                             dtype=torch.float64),
+        "time_profile_reference": torch.tensor(factors(reference), dtype=torch.float64),
     }
 
 
