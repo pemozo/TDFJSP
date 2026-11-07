@@ -287,7 +287,7 @@
     }
   },
   "experiments": {
-    "_comment": "Auswertung der Dispatching-Regeln (run_experiments.py) und von Policies in der Umgebung (rl/evaluate.py). classes: \"all\" oder Liste von Klassen. Dateien sind relativ zu dieser Datei.",
+    "_comment": "Auswertung der Dispatching-Regeln (run_experiments.py) und von Policies in der Umgebung (rl/evaluate.py). classes: \"all\" oder Liste von Klassen. Dateien sind relativ zu dieser Datei. slot_lookahead_minutes: so weit schaut EDD+SLOT nach einem kuerzeren Zeitslot fuer manuelle Operationen voraus (Minuten).",
     "classes": "all",
     "split": "test",
     "methods": [
@@ -310,6 +310,11 @@
         "sequencing": "EDD",
         "routing": "SPT",
         "view": "time_aware"
+      },
+      {
+        "sequencing": "EDD",
+        "routing": "SLOT",
+        "view": "time_aware"
       }
     ],
     "results_file": "results_generalization/baselines.csv",
@@ -317,7 +322,8 @@
     "policy_results_file": "results_generalization/policies.csv",
     "policy_summary_file": "results_generalization/policies_summary.csv",
     "policy_seed": 12345,
-    "evaluation_batch_size": 8
+    "evaluation_batch_size": 8,
+    "slot_lookahead_minutes": 120
   },
   "environment": {
     "_comment": "RL-Umgebung (rl/env.py). train_classes: \"all\" oder Liste; der Generator wechselt je Batch die Klasse. view: time_aware oder static. allow_wait: Aktion 0 = warten bis zum naechsten Ereignis. device: auto, cpu oder cuda. generator_workers: Prozesse fuer das Erzeugen on the fly (0 = im Hauptprozess). time_scale_minutes teilt alle Zeit-Merkmale. truncation_penalty_minutes: Strafe je offener Operation, wenn der Horizont nicht reicht.",

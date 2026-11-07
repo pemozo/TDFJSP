@@ -20,7 +20,7 @@ Ablauf (siehe simulator.py fuer die festgelegten Annahmen):
 """
 from __future__ import annotations
 
-from baselines.rules import ROUTING_RULES, SEQUENCING_RULES
+from baselines.rules import HOLDING_ROUTING_RULES, ROUTING_RULES, SEQUENCING_RULES
 from schedule_validator import instance_config
 from simulator import (DURATION_VIEWS, SimulationError, SimulationState,
                        execute_plan, plan_from_schedule)
@@ -35,15 +35,21 @@ def build_plan(config: dict, instance: dict, sequencing: str, routing: str,
     choose_entry = ROUTING_RULES[routing]
 
     state = SimulationState(config, instance, view)
+    held: set[str] = set()   # zu diesem Zeitpunkt von der Zuordnungs-Regel zurueckgehalten
     while not state.done():
-        candidates = state.candidate_operations()
+        candidates = [op for op in state.candidate_operations() if op["id"] not in held]
         if not candidates:
+            held.clear()
             if not state.advance():
                 raise SimulationError(f"{sequencing}+{routing} ({view}): keine Operation "
                                       "passt mehr in den Horizont")
             continue
         operation = choose_operation(state, candidates)
-        state.apply(choose_entry(state, operation, state.options(operation["id"])))
+        entry = choose_entry(state, operation, state.options(operation["id"]))
+        if entry is None:
+            held.add(operation["id"])
+            continue
+        state.apply(entry)
     return state.schedule
 
 
@@ -58,5 +64,6 @@ def run_dispatcher(config: dict, instance: dict, sequencing: str, routing: str,
                  "executed": Schedule, wie er mit echten Dauern ablaeuft}"""
     config = instance_config(config, instance)
     planned = build_plan(config, instance, sequencing, routing, view)
-    executed = execute_plan(config, instance, plan_from_schedule(planned))
+    executed = execute_plan(config, instance,
+                            plan_from_schedule(planned, keep_starts=routing in HOLDING_ROUTING_RULES))
     return {"planned": planned, "executed": executed}

@@ -7,12 +7,15 @@ __pycache__/
 instances/
 instances_zeitprofil/
 instances_generalization/
+instances_spielraum/
 
 # Ergebnisse: entstehen beim Training und bei run_experiments.py
 experiments/
 experiments_zeitprofil/
 experiments_generalization/
 results_generalization/
+experiments_spielraum/
+results_spielraum/
 results/
 results_zeitprofil/
 runs/

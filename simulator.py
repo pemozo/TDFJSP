@@ -222,6 +222,10 @@ class SimulationState:
             result.append(make_entry(op_id, resource, setup, self.time, setup_len, process_len))
         return result
 
+    def boundaries_between(self, start: int, end: int) -> list[int]:
+        """Fenstergrenzen t mit start < t <= end (Beginn eines Zeitfensters, Pausenende, Folgetag)."""
+        return [b for b in self._boundaries if start < b <= end]
+
     def candidate_operations(self) -> list[dict]:
         """Naechste Operationen aller Jobs, die jetzt auf mindestens einer
         Ressource starten koennen (Grundlage fuer Regeln und Action Masking)."""
@@ -265,31 +269,39 @@ class SimulationState:
 # Plan ausfuehren
 # --------------------------------------------------------------------------
 
-def plan_from_schedule(schedule: list[dict]) -> dict:
+def plan_from_schedule(schedule: list[dict], keep_starts: bool = False) -> dict:
     """Zuordnung und Reihenfolge je Ressource aus einem Schedule ablesen
-    (Eingabe fuer execute_plan)."""
+    (Eingabe fuer execute_plan). keep_starts=True: zusaetzlich die geplanten
+    Startzeiten als fruehesten Beginn ("not_before"), damit gewolltes Warten
+    eines Verfahrens bei der Ausfuehrung erhalten bleibt."""
     ordered = sorted(schedule, key=lambda e: (e.get("setup_start", e["start"]), e["start"]))
     sequence: dict[str, list[str]] = {}
     for e in ordered:
         sequence.setdefault(e["resource"], []).append(e["op"])
-    return {"assignment": {e["op"]: e["resource"] for e in schedule}, "sequence": sequence}
+    plan = {"assignment": {e["op"]: e["resource"] for e in schedule}, "sequence": sequence}
+    if keep_starts:
+        plan["not_before"] = {e["op"]: e.get("setup_start", e["start"]) for e in schedule}
+    return plan
 
 
 def execute_plan(config: dict, instance: dict, plan: dict,
                  overflow_days: int | None = None) -> list[dict]:
     """Fuehrt die Entscheidungen eines Plans mit den echten Dauern aus.
 
-    plan = {"assignment": {op_id: resource}, "sequence": {resource: [op_id, ...]}}
+    plan = {"assignment": {op_id: resource}, "sequence": {resource: [op_id, ...]},
+            optional "not_before": {op_id: fruehester Beginn}}
 
     Uebernommen werden nur Zuordnung und Reihenfolge je Ressource. Jede
     Operation startet zum fruehesten zulaessigen Zeitpunkt nach dem Ende
     ihres Vorgaengers im Job und des vorherigen Auftrags auf ihrer Ressource
-    (Ruestung zuerst, Bearbeitung direkt danach). SimulationError, wenn der
-    Plan auch mit Zusatztag nicht ausfuehrbar ist."""
+    (Ruestung zuerst, Bearbeitung direkt danach), mit not_before nicht frueher
+    als dort angegeben. SimulationError, wenn der Plan auch mit Zusatztag nicht
+    ausfuehrbar ist."""
     config = instance_config(config, instance)
     exec_instance = execution_instance(config, instance, overflow_days)
     ops = {o["id"]: o for o in instance["operations"]}
     assignment, sequence = plan["assignment"], plan["sequence"]
+    not_before = plan.get("not_before", {})
     _check_plan(ops, assignment, sequence)
 
     with_setup = set(setup_resources(config, instance))
@@ -322,7 +334,8 @@ def execute_plan(config: dict, instance: dict, plan: dict,
             found = first_feasible_start(config, exec_instance, op["kind"],
                                          op["base_processing"][resource],
                                          setup[1] if setup else 0,
-                                         max(resource_free[resource], job_ready[job["id"]]), resource)
+                                         max(resource_free[resource], job_ready[job["id"]],
+                                             not_before.get(op["id"], 0)), resource)
             if found is None:
                 raise SimulationError(f"{op['id']} passt auch mit den Zusatztagen "
                                       f"nicht mehr in den Horizont")
